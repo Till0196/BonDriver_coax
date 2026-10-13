@@ -1,0 +1,13 @@
+[package]
+name = "bondriver_probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bondriver-probe"
+path = "src/main.rs"
+
+[lints]
+workspace = true

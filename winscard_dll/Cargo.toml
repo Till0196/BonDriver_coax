@@ -1,0 +1,21 @@
+[package]
+name = "coax_winscard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+# Applications import it as `winscard.dll`.
+name = "winscard"
+crate-type = ["cdylib"]
+
+[dependencies]
+coax.workspace = true
+coax_settings.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+coax_exports.workspace = true

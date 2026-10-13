@@ -1,0 +1,28 @@
+# クロスビルドは zig でリンクする（32bit Windows と、古い glibc 向けも）：
+#
+#     cargo win                 # 64bit Windows（TVTest、EDCB）
+#     cargo win32               # 32bit Windows
+#     cargo linux               # Linux の EDCB（x86_64）
+#     cargo linux-arm64         #   arm64 のボード
+#     cargo linux-armhf         #   armhf
+#     cargo linux-x86           #   x86
+#
+# 要る物は `zig`（PATH に）と `cargo install cargo-zigbuild`。Windows でも同じで、
+# llvm-mingw は要らない。
+#
+# Linux 向けは glibc 2.17 に対してリンクする（ターゲットの末尾の `.2.17`）。何も言わずに
+# リンクするとビルド環境の glibc に依存してしまう。
+# Linux 向けに作るのはドライバーだけ。
+[alias]
+win = "zigbuild --release --target x86_64-pc-windows-gnullvm"
+win32 = "zigbuild --release --target i686-pc-windows-gnullvm"
+linux = "zigbuild --release -p bondriver_coax --target x86_64-unknown-linux-gnu.2.17"
+linux-arm64 = "zigbuild --release -p bondriver_coax --target aarch64-unknown-linux-gnu.2.17"
+linux-armhf = "zigbuild --release -p bondriver_coax --target armv7-unknown-linux-gnueabihf.2.17"
+linux-x86 = "zigbuild --release -p bondriver_coax --target i686-unknown-linux-gnu.2.17"
+
+[target.x86_64-pc-windows-gnullvm]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-gnullvm]
+rustflags = ["-C", "target-feature=+crt-static"]

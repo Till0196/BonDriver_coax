@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "bondriver",
+    "exports",
+    "probe",
+    "settings",
+    "tvt_plugin",
+    "winscard_dll",
+]
+
+[workspace.dependencies]
+# Shared by the three shipped libraries.
+coax_settings = { path = "settings" }
+# Used by their build scripts.
+coax_exports = { path = "exports" }
+
+coax = { git = "https://github.com/Till0196/coax-rs" }
+isdb = { git = "https://github.com/Till0196/coax-rs" }
+mmttlv = { git = "https://github.com/Till0196/coax-rs" }
+mpegts = { git = "https://github.com/Till0196/coax-rs" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true

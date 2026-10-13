@@ -1,0 +1,22 @@
+[package]
+name = "coax_plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "coax_plugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+coax.workspace = true
+coax_settings.workspace = true
+isdb.workspace = true
+mpegts.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+coax_exports.workspace = true

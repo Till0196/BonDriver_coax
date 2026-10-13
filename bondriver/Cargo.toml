@@ -1,0 +1,22 @@
+[package]
+name = "bondriver_coax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "BonDriver_coax"
+crate-type = ["cdylib"]
+
+[dependencies]
+coax.workspace = true
+coax_settings.workspace = true
+isdb.workspace = true
+
+[lints.rust]
+# The workspace's lints, plus non_snake_case: the library is named after the file a host loads.
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+non_snake_case = "allow"
+
