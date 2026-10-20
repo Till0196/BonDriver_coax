@@ -23,3 +23,10 @@ pub mod setup;
 pub mod trace;
 pub mod tuner_settings;
 pub mod wide;
+
+/// Names this release in the `User-Agent` of every request to the daemon, so
+/// that its log tells one release from another. Each library here holds its own
+/// copy of `coax`, so each calls this before its first request.
+pub fn name_agent() {
+    coax::http::name_agent(concat!("BonDriver_coax/", env!("CARGO_PKG_VERSION")));
+}

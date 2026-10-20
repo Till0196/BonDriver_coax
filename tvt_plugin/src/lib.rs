@@ -180,6 +180,7 @@ pub unsafe extern "system" fn TVTInitialize(param: *mut PluginParam) -> i32 {
         return 0;
     }
     trace::line("plugin: TVTInitialize");
+    coax_settings::name_agent();
     app::remember();
     let host = unsafe { Host::new(param) };
     let listening = host.listen(on_event);

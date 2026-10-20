@@ -62,6 +62,7 @@ mod attr {
 /// `COAX_HOST`, then `COAXD_SOCKET` -- and then that socket. Same variables and
 /// order as `coax` reads them.
 pub fn endpoint() -> Endpoint {
+    coax_settings::name_agent();
     Endpoint::parse(&settings().host)
 }
 

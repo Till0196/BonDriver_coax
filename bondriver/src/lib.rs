@@ -35,6 +35,7 @@ use crate::driver::Driver;
 /// Shared by both entry points, because what a host is handed differs between
 /// them and what it is handed a view of does not.
 fn build() -> Driver {
+    coax_settings::name_agent();
     // The file this copy's own name points at, holding both the settings and
     // the channels something has looked for. A BonDriver is installed by
     // copying it and adding a suffix -- one per lead -- and every copy reading
