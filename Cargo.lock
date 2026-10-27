@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "bondriver_coax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "coax",
  "coax_settings",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "bondriver_probe"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "cfg-if"
@@ -33,11 +33,11 @@ version = "0.1.0"
 
 [[package]]
 name = "coax_exports"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "coax_plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "coax",
  "coax_exports",
@@ -48,14 +48,14 @@ dependencies = [
 
 [[package]]
 name = "coax_settings"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "coax",
 ]
 
 [[package]]
 name = "coax_winscard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "coax",
  "coax_exports",
