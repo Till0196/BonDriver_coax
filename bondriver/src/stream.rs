@@ -404,7 +404,11 @@ impl Waiter {
         if queue.held >= self.unit {
             return true;
         }
+        // An ended stream has nothing more to say, but a host told so at once
+        // asks again at once.
         if queue.ended {
+            drop(queue);
+            thread::sleep(timeout);
             return false;
         }
         let (queue, _) = self

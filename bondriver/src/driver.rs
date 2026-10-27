@@ -9,9 +9,10 @@
 //! the whole of it sits behind one lock, [`Locked`], which is what the two
 //! interfaces hold.
 
+use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::thread;
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use coax::daemon::{self, Daemon};
 use coax::launch::Launcher;
@@ -52,8 +53,8 @@ pub struct Driver {
     handed_out: Vec<u8>,
     /// The tuners the daemon has, as they were when last asked. A space names
     /// its tuners by pattern and every tune has to turn those back into
-    /// identifiers; read again when a pattern stops matching anything, which is
-    /// what a card being plugged in looks like. Kept with what each tuner said
+    /// identifiers; read again on every change of channel, since a board may
+    /// have been pulled out or plugged in since. Kept with what each tuner said
     /// of itself and what it lets a channel set, which is what a tune adds to
     /// for that tuner.
     listed: Listed,
@@ -64,7 +65,30 @@ pub struct Driver {
     declared: Vec<(String, Vec<String>)>,
     /// What `[TunerSettings]` sets for each tuner beside the channel.
     settings: TunerSettings,
+    /// Getting the channel back after its stream ended without the host
+    /// asking, or nothing while the stream is running.
+    recovery: Option<Recovery>,
 }
+
+/// Getting a channel back whose stream ended: the daemon stopped, or the board
+/// was pulled out. A host does not tune again by itself; it goes on waiting
+/// for a stream that will not come.
+#[derive(Debug)]
+struct Recovery {
+    /// When to try next.
+    at: Instant,
+    /// How long to wait after the next failure.
+    wait: Duration,
+    /// A start of the daemon under way. Starting it takes seconds, which are
+    /// spent on a thread of their own rather than under the driver's lock.
+    starting: Option<JoinHandle<io::Result<String>>>,
+}
+
+/// How long a failed recovery waits before the next, at first and at most.
+/// A daemon that cannot be started or a board that is not there is not asked
+/// again and again by a host that keeps reading.
+const RECOVERY_FIRST: Duration = Duration::from_secs(2);
+const RECOVERY_LONGEST: Duration = Duration::from_secs(30);
 
 /// Whether a refusal was about the signal rather than about the tuner.
 ///
@@ -230,6 +254,7 @@ impl Driver {
             listed: Listed::default(),
             declared,
             settings,
+            recovery: None,
         }
     }
 
@@ -259,6 +284,7 @@ impl Driver {
         self.let_go_of_the_stream();
         self.open = false;
         self.tuned = None;
+        self.recovery = None;
     }
 
     /// Gives the tuner back, saying what was lost on the way if anything was.
@@ -338,10 +364,28 @@ impl Driver {
             trace!("SetChannel({space}, {channel}): nothing known about how to tune it");
             return false;
         }
+        self.recovery = None;
         // The old stream goes first. The daemon holds a tuner for as long as
         // the connection that asked for it, so keeping this would ask for a
         // second tuner.
         self.let_go_of_the_stream();
+
+        // The daemon was there at OpenTuner, which may have been hours ago.
+        if let Some(launcher) = &self.launcher
+            && self.daemon.version().is_err()
+        {
+            match self.daemon.ensure_running(launcher) {
+                Ok(version) => trace!("daemon started again: {version}"),
+                Err(reason) => {
+                    trace!("SetChannel({space}, {channel}): daemon unreachable: {reason}");
+                    self.tuned = None;
+                    return false;
+                }
+            }
+        }
+        // Boards come and go while the daemon runs, and one plugged into
+        // another socket comes back under another name.
+        self.listed = Listed::default();
 
         let mut refusal = String::from("no tuner to ask");
         for way in &ways {
@@ -451,8 +495,8 @@ impl Driver {
         if matched.iter().any(Option::is_some) {
             return matched;
         }
-        // Either the daemon has not been asked yet or a card has appeared
-        // since it was.
+        // Not asked yet for this tune, or a pattern of another way matched
+        // nothing in what was.
         self.listed = match self.daemon.listing() {
             // What the routes say a tuner receives goes on top of what the
             // tuner said: a Windows BDA tuner's driver often registers less
@@ -489,6 +533,7 @@ impl Driver {
     /// seconds.
     #[cfg(test)]
     pub fn wait_ts_stream(&mut self, timeout_ms: u32) -> u32 {
+        self.recover();
         wait_on(self.waiter(), timeout_ms)
     }
 
@@ -506,6 +551,7 @@ impl Driver {
     /// hands back a pointer has no buffer to fill, so it gives as much as has
     /// piled up.
     pub fn take_stream(&mut self) -> Option<&[u8]> {
+        self.recover();
         let taken = self.stream.as_ref()?.take_upto(MOST_AT_ONCE)?;
         self.handed_out = taken;
         Some(&self.handed_out)
@@ -514,6 +560,7 @@ impl Driver {
     /// The same, for the form of the call that copies into a buffer of the
     /// host's own: never more than the host said it had room for.
     pub fn take_stream_upto(&mut self, limit: usize) -> Option<&[u8]> {
+        self.recover();
         let taken = self.stream.as_ref()?.take_upto(limit.min(MOST_AT_ONCE))?;
         self.handed_out = taken;
         Some(&self.handed_out)
@@ -522,6 +569,90 @@ impl Driver {
     pub fn purge_ts_stream(&mut self) {
         if let Some(stream) = &self.stream {
             stream.purge();
+        }
+    }
+
+    /// Tunes the channel again when its stream has ended and everything it
+    /// sent has been handed over. Called as the host reads, which is the only
+    /// time a driver is called.
+    fn recover(&mut self) {
+        let Some((space, channel)) = self.tuned else {
+            self.recovery = None;
+            return;
+        };
+        let lost = self
+            .stream
+            .as_ref()
+            .is_none_or(|stream| stream.ended() && stream.ready() == 0);
+        if !lost {
+            self.recovery = None;
+            return;
+        }
+        let recovery = self.recovery.get_or_insert_with(|| {
+            trace!("the stream of {space}/{channel} ended; tuning it again");
+            Recovery {
+                at: Instant::now(),
+                wait: RECOVERY_FIRST,
+                starting: None,
+            }
+        });
+        if Instant::now() < recovery.at {
+            return;
+        }
+        if let Some(starting) = recovery.starting.take() {
+            if !starting.is_finished() {
+                recovery.starting = Some(starting);
+                return;
+            }
+            match starting.join() {
+                Ok(Ok(version)) => trace!("daemon started again: {version}"),
+                Ok(Err(reason)) => {
+                    trace!("daemon unreachable: {reason}");
+                    self.recovery_failed();
+                    return;
+                }
+                Err(_) => {
+                    self.recovery_failed();
+                    return;
+                }
+            }
+        } else if self.daemon.version().is_err() {
+            // Without a launcher the daemon is left to whoever runs it, and
+            // asked again later.
+            let Some(launcher) = self.launcher.clone() else {
+                self.recovery_failed();
+                return;
+            };
+            let daemon = self.daemon.clone();
+            match thread::Builder::new()
+                .name("coax daemon start".to_owned())
+                .spawn(move || daemon.ensure_running(&launcher))
+            {
+                Ok(starting) => recovery.starting = Some(starting),
+                Err(_) => self.recovery_failed(),
+            }
+            return;
+        }
+        let wait = recovery.wait;
+        if self.set_channel(space, channel) {
+            trace!("the stream of {space}/{channel} is back");
+            return;
+        }
+        // Kept, so that the next try knows what to tune. Tuning dropped the
+        // recovery, which is put back as it was.
+        self.tuned = Some((space, channel));
+        self.recovery = Some(Recovery {
+            at: Instant::now(),
+            wait,
+            starting: None,
+        });
+        self.recovery_failed();
+    }
+
+    fn recovery_failed(&mut self) {
+        if let Some(recovery) = &mut self.recovery {
+            recovery.at = Instant::now() + recovery.wait;
+            recovery.wait = (recovery.wait * 2).min(RECOVERY_LONGEST);
         }
     }
 }
@@ -563,7 +694,11 @@ impl Locked {
     /// a host waiting on the stream on one thread must not hold up the signal
     /// meter or a change of channel on another for the length of the wait.
     pub fn wait_ts_stream(&self, timeout_ms: u32) -> u32 {
-        let waiter = self.lock().waiter();
+        let waiter = {
+            let mut driver = self.lock();
+            driver.recover();
+            driver.waiter()
+        };
         wait_on(waiter, timeout_ms)
     }
 }
@@ -574,13 +709,13 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use coax::daemon::{Board, Controls, Daemon, Endpoint, GainControl, Held, LnbControl, Tuner};
     use coax_settings::channels::{Channel, Lineup, Route, Space};
     use coax_settings::tuner_settings::{Listed, TunerSettings};
 
-    use super::{Driver, NOT_TUNED, WAIT_TIMEOUT, asked_of, carrier_asks};
+    use super::{Driver, NOT_TUNED, RECOVERY_FIRST, WAIT_TIMEOUT, asked_of, carrier_asks};
 
     /// The daemon's listing of these tuners, each on a board of its own, with
     /// the controls each lets a channel set.
@@ -1117,5 +1252,188 @@ mod tests {
         driver.close_tuner();
         assert!(!driver.is_open());
         assert_eq!(driver.current_space(), NOT_TUNED);
+    }
+
+    /// A daemon that answers every request and ends each stream after one
+    /// packet, numbered by which stream it is. Its one tuner is named after
+    /// how many streams have been asked for, as a board plugged into another
+    /// socket each time would be. Hands back the stream requests once
+    /// `streams` have been made or the time is up.
+    fn ending_daemon(streams: u8) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port is free");
+        let address = listener
+            .local_addr()
+            .expect("the port is known")
+            .to_string();
+        listener
+            .set_nonblocking(true)
+            .expect("the listener can be polled");
+        let served = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut asked = Vec::new();
+            while asked.len() < usize::from(streams) && Instant::now() < deadline {
+                let Ok((mut connection, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                connection
+                    .set_nonblocking(false)
+                    .expect("the connection blocks");
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    match connection.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => request.push(byte[0]),
+                    }
+                }
+                if request.starts_with(b"GET /stream?") {
+                    asked.push(String::from_utf8_lossy(&request).into_owned());
+                    let mut packet = vec![0x47u8; 188];
+                    packet[4] = asked.len() as u8;
+                    let mut answer = b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nTransfer-Encoding: chunked\r\n\r\nbc\r\n".to_vec();
+                    answer.extend_from_slice(&packet);
+                    answer.extend_from_slice(b"\r\n0\r\n\r\n");
+                    let _ = connection.write_all(&answer);
+                } else if request.starts_with(b"GET /tuners ") {
+                    let listing = format!(
+                        r#"[{{"name": "zd:p{0}", "backend": "zd", "tuners": [{{"id": "zd:p{0}:0", "deliveries": ["ISDB-T"]}}]}}]"#,
+                        asked.len() + 1
+                    );
+                    let _ = connection.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{listing}",
+                            listing.len()
+                        )
+                        .as_bytes(),
+                    );
+                } else {
+                    let _ = connection.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\ntest",
+                    );
+                }
+            }
+            asked
+        });
+        (address, served)
+    }
+
+    /// Reads until a packet arrives or the time is up, as a host would.
+    fn next_packet(driver: &mut Driver, within: Duration) -> Option<Vec<u8>> {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            driver.wait_ts_stream(50);
+            if let Some(taken) = driver.take_stream() {
+                return Some(taken.to_vec());
+            }
+        }
+        None
+    }
+
+    /// A stream that ends without the host asking -- the daemon stopped, the
+    /// board was pulled out -- is tuned again on the same channel once what
+    /// it sent has been read.
+    #[test]
+    fn an_ended_stream_is_tuned_again() {
+        let (address, served) = ending_daemon(2);
+        let mut driver = Driver::new(
+            lineup(),
+            "coax",
+            Daemon::new(Endpoint::Network(address)),
+            None,
+            Vec::new(),
+            TunerSettings::default(),
+        );
+        assert!(driver.set_channel(0, 0));
+        let first = next_packet(&mut driver, Duration::from_secs(2)).expect("the first stream");
+        assert_eq!(first[4], 1);
+        let second = next_packet(&mut driver, Duration::from_secs(3)).expect("the stream is back");
+        assert_eq!(second[4], 2);
+        assert_eq!(driver.current_channel(), 0);
+        assert_eq!(
+            served.join().expect("the fake daemon did not fail").len(),
+            2
+        );
+    }
+
+    /// A host that closed the tuner wanted the stream to end.
+    #[test]
+    fn a_closed_tuner_is_not_tuned_again() {
+        let (address, served) = ending_daemon(2);
+        let mut driver = Driver::new(
+            lineup(),
+            "coax",
+            Daemon::new(Endpoint::Network(address)),
+            None,
+            Vec::new(),
+            TunerSettings::default(),
+        );
+        assert!(driver.set_channel(0, 0));
+        assert!(next_packet(&mut driver, Duration::from_secs(2)).is_some());
+        driver.close_tuner();
+        assert!(next_packet(&mut driver, Duration::from_millis(500)).is_none());
+        assert_eq!(
+            served.join().expect("the fake daemon did not fail").len(),
+            1
+        );
+    }
+
+    /// A channel that cannot be had back is not asked for again until the
+    /// wait is over, and the wait grows.
+    #[test]
+    fn a_failed_recovery_waits_before_the_next() {
+        let mut driver = Driver::new(
+            lineup(),
+            "coax",
+            nowhere(),
+            None,
+            Vec::new(),
+            TunerSettings::default(),
+        );
+        driver.tuned = Some((0, 0));
+        driver.recover();
+        let recovery = driver.recovery.as_ref().expect("still recovering");
+        assert!(recovery.at > Instant::now() + Duration::from_secs(1));
+        assert_eq!(recovery.wait, RECOVERY_FIRST * 2);
+        assert_eq!(
+            driver.current_channel(),
+            0,
+            "the channel is kept for the next try"
+        );
+    }
+
+    /// A board pulled out and plugged into another socket while the daemon
+    /// runs comes back under another name, which the next change of channel
+    /// asks for.
+    #[test]
+    fn each_change_of_channel_asks_for_the_tuners_again() {
+        let (address, served) = ending_daemon(2);
+        let mut lineup = lineup();
+        lineup = Lineup::new(
+            lineup
+                .spaces()
+                .iter()
+                .cloned()
+                .map(|space| Space {
+                    tuners: vec!["zd:*".to_owned()],
+                    ..space
+                })
+                .collect(),
+        );
+        let mut driver = Driver::new(
+            lineup,
+            "coax",
+            Daemon::new(Endpoint::Network(address)),
+            None,
+            Vec::new(),
+            TunerSettings::default(),
+        );
+        assert!(driver.set_channel(0, 0));
+        assert!(next_packet(&mut driver, Duration::from_secs(2)).is_some());
+        assert!(driver.set_channel(0, 0));
+        let asked = served.join().expect("the fake daemon did not fail");
+        assert_eq!(asked.len(), 2);
+        assert!(asked[0].contains("tuner=zd%3Ap1%3A0"), "asked {}", asked[0]);
+        assert!(asked[1].contains("tuner=zd%3Ap2%3A0"), "asked {}", asked[1]);
     }
 }
