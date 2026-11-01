@@ -39,11 +39,12 @@ impl TunerSettings {
             return;
         }
         let mut setting = TunerSetting::default();
-        for field in line.split(',') {
-            let Some((name, value)) = field.split_once('=') else {
+        for field in crate::syntax::split(line, ',') {
+            let Some((name, value)) = crate::syntax::assignment(field) else {
                 continue;
             };
-            let value = value.trim();
+            let value = crate::syntax::unquote(value);
+            let value = value.as_str();
             match name.trim().to_ascii_lowercase().as_str() {
                 "lnb" | "lnb_power" => {
                     if let Some(lnb) = lnb_level(value) {
@@ -128,7 +129,7 @@ impl TunerSettings {
             if !setting.gain.is_empty() {
                 fields.push(format!("gain={}", setting.gain));
             }
-            let mut padded = pattern.clone();
+            let mut padded = crate::syntax::quote(pattern);
             for _ in pattern.chars().count()..wide {
                 padded.push(' ');
             }

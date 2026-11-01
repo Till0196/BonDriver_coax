@@ -20,6 +20,7 @@ pub mod config;
 pub mod defined;
 pub mod lineup;
 pub mod setup;
+pub mod syntax;
 pub mod trace;
 pub mod tuner_settings;
 pub mod wide;

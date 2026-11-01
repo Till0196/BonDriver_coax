@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use coax::delivery::{self, Family};
 use coax::plan::{Band, CABLE_BANDS, DEFAULT_BANDS};
 
+use crate::syntax;
 use crate::tuner_settings::TunerSettings;
 
 /// What the file says.
@@ -171,9 +172,9 @@ impl Config {
         let mut named: Vec<Vec<String>> = Vec::new();
         for (section, name, value) in entries(text) {
             match (section.as_str(), name.to_ascii_lowercase().as_str()) {
-                ("coax", "host") => config.host = value,
-                ("coax", "tuner") => config.tuner = value,
-                ("coax", "daemon") => config.daemon = value,
+                ("coax", "host") => config.host = syntax::unquote(&value),
+                ("coax", "tuner") => config.tuner = syntax::unquote(&value),
+                ("coax", "daemon") => config.daemon = syntax::unquote(&value),
                 ("coax", "startdaemon") => config.start_daemon = is_yes(&value),
                 // A priority nobody could read is left at zero rather than
                 // refused, as everything else in this file is: a mistyped
@@ -188,7 +189,7 @@ impl Config {
                     }
                 }
                 ("tuners", _) => {
-                    if let Some(route) = Route::parse(name.trim(), &value) {
+                    if let Some(route) = Route::parse(&name, &value) {
                         config.tuners.insert(route.label.clone(), route);
                     }
                 }
@@ -245,11 +246,8 @@ impl Route {
         if label.is_empty() {
             return None;
         }
-        let mut fields = line
-            .split(',')
-            .map(str::trim)
-            .filter(|field| !field.is_empty());
-        let system = fields.next()?.to_owned();
+        let mut fields = syntax::split(line, ',').filter(|field| !field.is_empty());
+        let system = syntax::unquote(fields.next()?);
         // `bands=` is itself a list, and the comma inside `bands=UHF,CATV` has
         // already split the line: once it starts, every bare field to the end
         // is a band.
@@ -257,14 +255,14 @@ impl Route {
         let mut bands = Vec::new();
         let mut in_bands = false;
         for field in fields {
-            match field.split_once('=') {
+            match syntax::assignment(field) {
                 Some(("bands", named)) => {
                     in_bands = true;
                     bands.extend(named.split_whitespace().filter_map(Band::parse));
                 }
                 Some(_) => in_bands = false,
                 None if in_bands => bands.extend(field.split_whitespace().filter_map(Band::parse)),
-                None => tuners.push(field.to_owned()),
+                None => tuners.push(syntax::unquote(field)),
             }
         }
         if bands.is_empty() {
@@ -288,8 +286,8 @@ impl SpaceSetting {
     /// `name=value`, which is what tells the two apart on one comma-separated
     /// list.
     pub(crate) fn parse(line: &str) -> Option<(Self, Vec<String>)> {
-        let mut fields = line.split(',').map(str::trim);
-        let name = fields.next()?.to_owned();
+        let mut fields = syntax::split(line, ',');
+        let name = syntax::unquote(fields.next()?);
         if name.is_empty() {
             return None;
         }
@@ -300,13 +298,13 @@ impl SpaceSetting {
         let mut group = String::new();
         let mut in_options = false;
         for field in fields {
-            match field.split_once('=') {
+            match syntax::assignment(field) {
                 Some(("group", named)) => {
                     in_options = true;
                     group = named.trim().to_ascii_uppercase();
                 }
                 Some(_) => in_options = true,
-                None if !in_options && !field.is_empty() => labels.push(field.to_owned()),
+                None if !in_options && !field.is_empty() => labels.push(syntax::unquote(field)),
                 None => {}
             }
         }
@@ -420,8 +418,8 @@ pub(crate) fn entries(text: &str) -> Vec<(String, String, String)> {
             section = name.trim().to_ascii_lowercase();
             continue;
         }
-        if let Some((name, value)) = line.split_once('=') {
-            found.push((section.clone(), name.trim().to_owned(), trim_comment(value)));
+        if let Some((name, value)) = syntax::assignment(line) {
+            found.push((section.clone(), syntax::unquote(name), trim_comment(value)));
         }
     }
     found
@@ -432,8 +430,22 @@ pub(crate) fn entries(text: &str) -> Vec<(String, String, String)> {
 /// has are written.
 fn trim_comment(value: &str) -> String {
     let value = value.trim();
+    let mut quoted = false;
+    let mut escaped = false;
     for (at, letter) in value.char_indices() {
-        let starts_a_comment = (letter == ';' || letter == '#')
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quoted && letter == '\\' {
+            escaped = true;
+            continue;
+        }
+        if letter == '"' {
+            quoted = !quoted;
+        }
+        let starts_a_comment = !quoted
+            && (letter == ';' || letter == '#')
             && at > 0
             && value[..at].ends_with(char::is_whitespace);
         if starts_a_comment {

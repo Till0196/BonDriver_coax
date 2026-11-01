@@ -67,7 +67,7 @@ impl Setup {
         for (section, name, value) in config::entries(text) {
             match section.as_str() {
                 "tuners" => {
-                    if let Some(route) = Route::parse(name.trim(), &value) {
+                    if let Some(route) = Route::parse(&name, &value) {
                         setup.routes.push(route);
                     }
                 }
@@ -133,10 +133,6 @@ impl Setup {
             let label = route.label.trim();
             if label.is_empty() {
                 problems.push(format!("{}番目の経路にラベルがありません", index + 1));
-            } else if label.contains(|letter: char| {
-                letter.is_whitespace() || matches!(letter, ',' | '=' | ';' | '#' | '[' | ']')
-            }) {
-                problems.push(format!("ラベル「{label}」に使えない文字があります"));
             } else if self.routes[..index]
                 .iter()
                 .any(|other| other.label.trim() == label)
@@ -152,9 +148,6 @@ impl Setup {
             if name.is_empty() {
                 problems.push("名前のない空間があります".to_owned());
                 continue;
-            }
-            if name.contains(',') {
-                problems.push(format!("空間の名前「{name}」にコンマは使えません"));
             }
             for label in &space.labels {
                 if !self.routes.iter().any(|route| route.label == *label) {
@@ -204,7 +197,11 @@ impl Setup {
             .max()
             .unwrap_or(0);
         for route in &self.routes {
-            let mut rest: Vec<String> = route.tuners.clone();
+            let mut rest: Vec<String> = route
+                .tuners
+                .iter()
+                .map(|s| crate::syntax::quote(s))
+                .collect();
             if bands_are_written(&route.system) {
                 rest.push(format!(
                     "bands={}",
@@ -217,15 +214,21 @@ impl Setup {
                 ));
             }
             let line = if rest.is_empty() {
-                route.system.clone()
+                crate::syntax::quote(&route.system)
             } else {
                 format!(
                     "{} {}",
-                    pad(&format!("{},", route.system), system_wide),
+                    pad(
+                        &format!("{},", crate::syntax::quote(&route.system)),
+                        system_wide
+                    ),
                     rest.join(", ")
                 )
             };
-            text.push_str(&format!("{} = {line}\n", pad(&route.label, label_wide)));
+            text.push_str(&format!(
+                "{} = {line}\n",
+                pad(&crate::syntax::quote(&route.label), label_wide)
+            ));
         }
         text
     }
@@ -240,13 +243,17 @@ impl Setup {
             .max()
             .unwrap_or(0);
         for (index, space) in self.spaces.iter().enumerate() {
-            let mut fields = space.labels.clone();
+            let mut fields: Vec<String> = space
+                .labels
+                .iter()
+                .map(|s| crate::syntax::quote(s))
+                .collect();
             if !space.group.is_empty() {
                 fields.push(format!("group={}", space.group));
             }
-            let name = format!("{},", space.name);
+            let name = format!("{},", crate::syntax::quote(&space.name));
             let line = if fields.is_empty() {
-                space.name.clone()
+                crate::syntax::quote(&space.name)
             } else {
                 format!("{} {}", pad(&name, name_wide), fields.join(", "))
             };
@@ -812,6 +819,33 @@ cable = DVBC/ANNEX_A, tbs:*
     }
 
     #[test]
+    fn arbitrary_names_survive_settings_and_tuning_readers() {
+        for name in [
+            "KTV-FSMINI, KTV-FSUSB2/V3",
+            "a=b ; comment # [section]",
+            "a\"b\\c",
+            "a\nb\r\t",
+        ] {
+            let mut setup = Setup::read(FILE);
+            setup.routes[0].label = name.to_owned();
+            setup.routes[0].tuners = vec![format!("model:{name}*"), format!("usb:{name}:0")];
+            setup.spaces[0].name = name.to_owned();
+            setup.spaces[0].labels = vec![name.to_owned()];
+            setup
+                .tuner_settings
+                .add_line(&format!("model:{name}*"), "gain=auto");
+            let written = setup.write_into(FILE);
+            assert_eq!(Setup::read(&written), setup, "{written}");
+            let config = Config::parse(&written);
+            assert_eq!(config.tuners[name], setup.routes[0]);
+            assert_eq!(config.spaces[0].name, name);
+            assert_eq!(config.spaces[0].routes[0], setup.routes[0]);
+            assert_eq!(config.tuner_settings, setup.tuner_settings);
+            assert_eq!(setup.write_into(&written), written);
+        }
+    }
+
+    #[test]
     fn what_is_wrong_is_said() {
         let mut setup = Setup::suggested(&[]);
         setup.routes[1].label = "isdbt".to_owned();
@@ -829,12 +863,6 @@ cable = DVBC/ANNEX_A, tbs:*
         let problems = setup.problems();
         assert!(
             problems.iter().any(|one| one.contains("「isdbt」が重複")),
-            "{problems:?}"
-        );
-        assert!(
-            problems
-                .iter()
-                .any(|one| one.contains("「bad label」に使えない")),
             "{problems:?}"
         );
         assert!(

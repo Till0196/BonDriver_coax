@@ -931,7 +931,7 @@ mod windows {
             "EDIT",
             &route
                 .as_ref()
-                .map(|route| route.tuners.join(", "))
+                .map(|route| coax_settings::syntax::list(&route.tuners))
                 .unwrap_or_default(),
             WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
             (m.margin + label + m.gap, y, inner - label - m.gap, field),
@@ -1112,7 +1112,11 @@ mod windows {
         })
         .unwrap_or_default();
         *WRITING_PATTERN.lock().expect("the flag is not poisoned") = true;
-        set_text(window, ID_R_PATTERN, &patterns.join(", "));
+        set_text(
+            window,
+            ID_R_PATTERN,
+            &coax_settings::syntax::list(&patterns),
+        );
         *WRITING_PATTERN.lock().expect("the flag is not poisoned") = false;
     }
 
@@ -1131,11 +1135,9 @@ mod windows {
     }
 
     fn patterns_typed(window: Handle) -> Vec<String> {
-        text_of(window, ID_R_PATTERN)
-            .split(',')
-            .map(str::trim)
+        coax_settings::syntax::split(&text_of(window, ID_R_PATTERN), ',')
             .filter(|pattern| !pattern.is_empty())
-            .map(str::to_owned)
+            .map(coax_settings::syntax::unquote)
             .collect()
     }
 

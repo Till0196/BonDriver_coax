@@ -86,12 +86,12 @@ impl Definition {
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             return None;
         }
-        let mut columns = line.split(',').map(str::trim);
+        let mut columns = crate::syntax::split(line, ',');
         let onid = number(columns.next()?)?;
         let tsid = number(columns.next()?)?;
-        let name = columns.next()?.to_owned();
-        let tuners = dash(columns.next()?);
-        let system = columns.next()?.to_owned();
+        let name = crate::syntax::unquote(columns.next()?);
+        let tuners = dash(&crate::syntax::unquote(columns.next()?));
+        let system = crate::syntax::unquote(columns.next()?);
         let carriers: Vec<String> = columns
             .next()?
             .split('+')
@@ -107,8 +107,13 @@ impl Definition {
             Some(written) => slot(written)?,
         };
         let extras = columns
-            .filter_map(|column| column.split_once('='))
-            .map(|(key, value)| (key.trim().to_ascii_uppercase(), value.trim().to_owned()))
+            .filter_map(crate::syntax::assignment)
+            .map(|(key, value)| {
+                (
+                    crate::syntax::unquote(key).to_ascii_uppercase(),
+                    crate::syntax::unquote(value),
+                )
+            })
             .filter(|(key, _)| !key.is_empty())
             .collect();
         Some(Self {
@@ -129,13 +134,13 @@ impl Definition {
             "{}, {}, {}, {}, {}, {}, {}",
             self.onid,
             self.tsid,
-            self.name,
+            crate::syntax::quote(&self.name),
             if self.tuners.is_empty() {
-                "-"
+                "-".to_owned()
             } else {
-                &self.tuners
+                crate::syntax::quote(&self.tuners)
             },
-            self.system,
+            crate::syntax::quote(&self.system),
             self.carriers.join("+"),
             match self.slot {
                 Slot::Whole => "-".to_owned(),
@@ -144,7 +149,11 @@ impl Definition {
             }
         );
         for (key, value) in &self.extras {
-            line.push_str(&format!(", {key}={value}"));
+            line.push_str(&format!(
+                ", {}={}",
+                crate::syntax::quote(key),
+                crate::syntax::quote(value)
+            ));
         }
         line
     }
@@ -195,14 +204,14 @@ pub struct Defined {
 const SECTION: &str = "channels";
 
 /// The space a section header names, where the section is one of ours.
-fn header(line: &str) -> Option<&str> {
+fn header(line: &str) -> Option<String> {
     let inside = line.trim().strip_prefix('[')?.strip_suffix(']')?.trim();
     let (kind, space) = inside.split_once(char::is_whitespace)?;
     if !kind.eq_ignore_ascii_case(SECTION) {
         return None;
     }
     let space = space.trim();
-    (!space.is_empty()).then_some(space)
+    (!space.is_empty()).then(|| crate::syntax::unquote(space))
 }
 
 /// Whether a line opens a section of any kind.
@@ -223,7 +232,7 @@ impl Defined {
         let mut current: Option<String> = None;
         for line in text.lines() {
             if is_header(line) {
-                current = header(line).map(str::to_owned);
+                current = header(line);
                 if let Some(space) = &current {
                     defined.space_mut(space);
                 }
@@ -295,14 +304,14 @@ impl Defined {
             if is_header(line) {
                 skipping = false;
                 if let Some(space) = header(line) {
-                    let lines = self.of(space);
+                    let lines = self.of(&space);
                     skipping = true;
                     if lines.is_empty() {
                         // Taken out, header and all.
                         continue;
                     }
-                    if !written.iter().any(|done| done == space) {
-                        out.push_str(&section(space, lines));
+                    if !written.iter().any(|done| done == &space) {
+                        out.push_str(&section(&space, lines));
                         written.push(space.to_owned());
                     }
                     continue;
@@ -329,7 +338,7 @@ impl Defined {
 
 /// One section, header and lines, ready to go into the file.
 fn section(space: &str, lines: &[Definition]) -> String {
-    let mut text = format!("[Channels {space}]\n");
+    let mut text = format!("[Channels {}]\n", crate::syntax::quote(space));
     text.push_str("; onid, tsid, name, route, system, frequency, slot [, KEY=VALUE ...]\n");
     for line in lines {
         text.push_str(&line.render());
@@ -366,6 +375,22 @@ cable = ISDBC, tbs:*
 ";
 
     /// A line is read back as it was written, columns and all.
+    #[test]
+    fn channel_names_and_values_survive_settings_syntax() {
+        for name in ["a,b=c ; # [x]", "a\"b\\c", "a\nb\r\t"] {
+            let mut line = Definition::parse("1, 2, channel, route, ISDBT, 557142857, -").unwrap();
+            line.name = name.to_owned();
+            line.tuners = name.to_owned();
+            line.extras = vec![("KEY".to_owned(), name.to_owned())];
+            assert_eq!(Definition::parse(&line.render()), Some(line.clone()));
+            let mut defined = Defined::none();
+            defined.set(name, vec![line]);
+            let written = defined.write_into("");
+            assert_eq!(Defined::parse(&written), defined);
+            assert_eq!(defined.write_into(&written), written);
+        }
+    }
+
     #[test]
     fn a_line_is_what_it_says() {
         let line = Definition::parse(
