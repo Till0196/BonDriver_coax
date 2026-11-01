@@ -148,6 +148,7 @@ pub fn system() -> &'static System {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetSystemDirectoryW(into: *mut u16, size: u32) -> u32;
+    fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut *mut c_void) -> i32;
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
 }
@@ -155,6 +156,24 @@ unsafe extern "system" {
 fn library() -> *mut c_void {
     static MODULE: OnceLock<usize> = OnceLock::new();
     *MODULE.get_or_init(|| {
+        // The system DLL stays loaded after a decoder unloads us. If we were
+        // unloaded, its next import of "winscard.dll" would bind to that DLL
+        // instead of this one. Keep this module loaded before loading its
+        // namesake, so repeated decoder loads keep finding the same readers.
+        const PIN: u32 = 0x0000_0001;
+        const FROM_ADDRESS: u32 = 0x0000_0004;
+        let mut own_module = std::ptr::null_mut();
+        if unsafe {
+            GetModuleHandleExW(
+                PIN | FROM_ADDRESS,
+                library as *const () as *const u16,
+                &mut own_module,
+            )
+        } == 0
+        {
+            coax_settings::trace!("winscard: could not retain the proxy module");
+            return 0;
+        }
         let mut directory = [0u16; 260];
         let length =
             unsafe { GetSystemDirectoryW(directory.as_mut_ptr(), directory.len() as u32) } as usize;
