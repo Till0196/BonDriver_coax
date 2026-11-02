@@ -689,8 +689,9 @@ pub unsafe extern "system" fn SCardStatusA(
             None => SCARD_E_NO_SERVICE,
         };
     };
-    let Some(seen) = look_at_card(&ours) else {
-        return SCARD_E_NO_SERVICE;
+    let seen = match look_at_card(&ours) {
+        Ok(seen) => seen,
+        Err(code) => return code,
     };
     let reported = unsafe { report(&seen, state_out, protocol, atr, atr_length) };
     if !reader_length.is_null() {
@@ -729,8 +730,9 @@ pub unsafe extern "system" fn SCardStatusW(
             None => SCARD_E_NO_SERVICE,
         };
     };
-    let Some(seen) = look_at_card(&ours) else {
-        return SCARD_E_NO_SERVICE;
+    let seen = match look_at_card(&ours) {
+        Ok(seen) => seen,
+        Err(code) => return code,
     };
     let reported = unsafe { report(&seen, state_out, protocol, atr, atr_length) };
     if !reader_length.is_null() {
@@ -745,13 +747,18 @@ pub unsafe extern "system" fn SCardStatusW(
 
 /// Asks after a connected card, which is also what makes the daemon look: the
 /// published state is a memory of the last look until something asks.
-fn look_at_card(card: &Card) -> Option<ReaderState> {
+fn look_at_card(card: &Card) -> Result<ReaderState, Status> {
     let remote = card.remote;
-    on_card(card, |link| link.status(remote)).ok()?;
+    let code = on_card(card, |link| link.status(remote))? as Status;
+    if code != SCARD_S_SUCCESS {
+        return Err(code);
+    }
     card.context
-        .readers()?
+        .readers()
+        .ok_or(SCARD_E_NO_SERVICE)?
         .into_iter()
         .find(|reader| reader.name == card.reader)
+        .ok_or(SCARD_E_READER_UNAVAILABLE)
 }
 
 /// Writes the parts of `SCardStatus` that are the same in both flavours. The
@@ -792,10 +799,10 @@ pub unsafe extern "system" fn SCardGetStatusChangeA(
             None => SCARD_E_NO_SERVICE,
         };
     };
-    if readers.is_null() && count != 0 {
-        return SCARD_E_INVALID_PARAMETER;
-    }
-    let mut entries = unsafe { std::slice::from_raw_parts_mut(readers, count as usize) };
+    let mut entries = match unsafe { reader_entries(readers, count) } {
+        Ok(entries) => entries,
+        Err(code) => return code,
+    };
     wait_for_change(&ours, timeout, &mut entries)
 }
 
@@ -812,10 +819,10 @@ pub unsafe extern "system" fn SCardGetStatusChangeW(
             None => SCARD_E_NO_SERVICE,
         };
     };
-    if readers.is_null() && count != 0 {
-        return SCARD_E_INVALID_PARAMETER;
-    }
-    let mut entries = unsafe { std::slice::from_raw_parts_mut(readers, count as usize) };
+    let mut entries = match unsafe { reader_entries(readers, count) } {
+        Ok(entries) => entries,
+        Err(code) => return code,
+    };
     wait_for_change(&ours, timeout, &mut entries)
 }
 
@@ -1391,5 +1398,39 @@ unsafe fn forward_handle(handle: Handle, entry: Option<crate::system::OnHandle>)
     match entry {
         Some(call) => unsafe { call(handle) },
         None => SCARD_E_INVALID_HANDLE,
+    }
+}
+
+// The caller supplies count valid, exclusively borrowed entries when count is
+// nonzero. An empty Windows array may be NULL, unlike a Rust slice.
+unsafe fn reader_entries<'a, T>(readers: *mut T, count: u32) -> Result<&'a mut [T], Status> {
+    if count == 0 {
+        return Ok(&mut []);
+    }
+    if readers.is_null() {
+        return Err(SCARD_E_INVALID_PARAMETER);
+    }
+    Ok(unsafe { std::slice::from_raw_parts_mut(readers, count as usize) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_reader_arrays_accept_null_without_constructing_a_null_slice() {
+        assert!(
+            unsafe { reader_entries::<ReaderStateA>(std::ptr::null_mut(), 0) }
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            unsafe { reader_entries::<ReaderStateW>(std::ptr::null_mut(), 0) }
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            unsafe { reader_entries::<ReaderStateA>(std::ptr::null_mut(), 1) }.unwrap_err(),
+            SCARD_E_INVALID_PARAMETER
+        );
     }
 }

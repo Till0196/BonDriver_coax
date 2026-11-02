@@ -28,6 +28,8 @@ pub const SCARD_E_UNKNOWN_READER: Status = 0x8010_0009u32 as i32;
 pub const SCARD_E_TIMEOUT: Status = 0x8010_000Au32 as i32;
 pub const SCARD_E_NO_SERVICE: Status = 0x8010_001Du32 as i32;
 pub const SCARD_E_NO_READERS_AVAILABLE: Status = 0x8010_002Eu32 as i32;
+pub const SCARD_E_READER_UNAVAILABLE: Status = 0x8010_0017u32 as i32;
+pub const SCARD_W_RESET_CARD: Status = 0x8010_0068u32 as i32;
 
 /// The protocols, which agree with the daemon's for the two that matter.
 pub const SCARD_PROTOCOL_T1: u32 = 0x0002;
@@ -81,4 +83,44 @@ pub struct ReaderStateW {
     pub event_state: u32,
     pub atr_length: u32,
     pub atr: [u8; 36],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::{align_of, offset_of, size_of};
+
+    // Check the external Windows layout while compiling tests too, including
+    // ARM64 targets on which the test executable cannot run on the build host.
+    const fn check_windows_layout() {
+        let word = size_of::<usize>();
+        assert!(size_of::<Status>() == 4);
+        assert!(size_of::<Handle>() == word);
+        assert!(size_of::<IoRequest>() == 8);
+        assert!(offset_of!(IoRequest, pci_length) == 4);
+        assert!(size_of::<ReaderStateA>() == 48 + 2 * word);
+        assert!(size_of::<ReaderStateW>() == 48 + 2 * word);
+        assert!(align_of::<ReaderStateA>() == word);
+        assert!(align_of::<ReaderStateW>() == word);
+        assert!(offset_of!(ReaderStateA, user_data) == word);
+        assert!(offset_of!(ReaderStateW, user_data) == word);
+        assert!(offset_of!(ReaderStateA, current_state) == 2 * word);
+        assert!(offset_of!(ReaderStateW, current_state) == 2 * word);
+        assert!(offset_of!(ReaderStateA, event_state) == 2 * word + 4);
+        assert!(offset_of!(ReaderStateW, event_state) == 2 * word + 4);
+        assert!(offset_of!(ReaderStateA, atr_length) == 2 * word + 8);
+        assert!(offset_of!(ReaderStateW, atr_length) == 2 * word + 8);
+        assert!(offset_of!(ReaderStateA, atr) == 2 * word + 12);
+        assert!(offset_of!(ReaderStateW, atr) == 2 * word + 12);
+    }
+
+    const _: () = check_windows_layout();
+
+    #[test]
+    fn windows_layout_and_signed_status_match_the_headers() {
+        check_windows_layout();
+        assert!(SCARD_E_READER_UNAVAILABLE < 0);
+        assert_eq!(SCARD_E_READER_UNAVAILABLE as u32, 0x8010_0017);
+        assert_eq!(SCARD_W_RESET_CARD as u32, 0x8010_0068);
+    }
 }

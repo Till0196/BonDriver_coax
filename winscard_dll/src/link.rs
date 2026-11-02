@@ -29,7 +29,7 @@ use coax::launch::Launcher;
 
 use crate::abi::{
     SCARD_E_INVALID_HANDLE, SCARD_E_INVALID_PARAMETER, SCARD_E_NO_SERVICE, SCARD_E_UNKNOWN_READER,
-    SCARD_PROTOCOL_T1, SCARD_S_SUCCESS,
+    SCARD_PROTOCOL_T1, SCARD_S_SUCCESS, SCARD_W_RESET_CARD,
 };
 use crate::wire::{self, ReaderState};
 
@@ -217,7 +217,7 @@ impl Link {
     ) -> io::Result<(i32, u32, u32)> {
         const SHARE_EXCLUSIVE: u32 = 1;
         const SHARE_SHARED: u32 = 2;
-        if share != SHARE_EXCLUSIVE && share != SHARE_SHARED {
+        if share != SHARE_SHARED && share != SHARE_EXCLUSIVE {
             return Ok((0, 0, SCARD_E_INVALID_PARAMETER as u32));
         }
         if protocols & SCARD_PROTOCOL_T1 == 0 {
@@ -234,7 +234,7 @@ impl Link {
                 table().refresh(&self.cards, reader);
                 Ok((number, SCARD_PROTOCOL_T1, SCARD_S_SUCCESS as u32))
             }
-            Err(Refusal::Broken(reason)) => Err(reason),
+            Err(Refusal::Broken(_)) => Ok((0, 0, SCARD_E_NO_SERVICE as u32)),
             Err(refused) => Ok((0, 0, status_for(&refused))),
         }
     }
@@ -249,23 +249,27 @@ impl Link {
         protocols: u32,
         initialization: u32,
     ) -> io::Result<(u32, u32)> {
-        let Some(mut held) = self.open.remove(&card) else {
+        if initialization == 3 {
+            return Ok((0, UNSUPPORTED_FEATURE));
+        }
+        if !matches!(share, 1 | 2) || protocols & SCARD_PROTOCOL_T1 == 0 || initialization > 2 {
+            return Ok((0, SCARD_E_INVALID_PARAMETER as u32));
+        }
+        let Some(held) = self.open.get_mut(&card) else {
             return Ok((0, SCARD_E_INVALID_HANDLE as u32));
         };
         let reader = held.reader().to_owned();
-        let _ = held.close(disposition_name(initialization));
-        drop(held);
-
-        match self.connect_card(0, &reader, share, protocols)? {
-            (number, protocol, result) if result == SCARD_S_SUCCESS as u32 => {
-                // The application still knows this card by its old number, so
-                // the new connection is filed under it.
-                if let Some(reopened) = self.open.remove(&number) {
-                    self.open.insert(card, reopened);
-                }
-                Ok((protocol, result))
+        if held.open() {
+            let _ = held.close(disposition_name(initialization));
+        }
+        match self.cards.open(&reader, WAIT_SECONDS) {
+            Ok(reopened) => {
+                self.open.insert(card, reopened);
+                table().refresh(&self.cards, &reader);
+                Ok((SCARD_PROTOCOL_T1, SCARD_S_SUCCESS as u32))
             }
-            (_, _, result) => Ok((0, result)),
+            Err(Refusal::Broken(_)) => Ok((0, SCARD_E_NO_SERVICE as u32)),
+            Err(refused) => Ok((0, status_for(&refused))),
         }
     }
 
@@ -273,9 +277,12 @@ impl Link {
         let Some(mut held) = self.open.remove(&card) else {
             return Ok(SCARD_E_INVALID_HANDLE as u32);
         };
+        if !held.open() {
+            return Ok(SCARD_S_SUCCESS as u32);
+        }
         match held.close(disposition_name(disposition)) {
             Ok(()) => Ok(SCARD_S_SUCCESS as u32),
-            Err(Refusal::Broken(reason)) => Err(reason),
+            Err(Refusal::Broken(_)) => Ok(SCARD_E_NO_SERVICE as u32),
             Err(refused) => Ok(status_for(&refused)),
         }
     }
@@ -296,9 +303,18 @@ impl Link {
         let Some(held) = self.open.get(&card) else {
             return Ok(SCARD_E_INVALID_HANDLE as u32);
         };
+        if !held.open() {
+            return Ok(SCARD_W_RESET_CARD as u32);
+        }
         let reader = held.reader().to_owned();
-        table().refresh(&self.cards, &reader);
-        Ok(SCARD_S_SUCCESS as u32)
+        match self.cards.events(&reader, 0, 0) {
+            Ok(seen) => {
+                table().remember(&reader, seen);
+                Ok(SCARD_S_SUCCESS as u32)
+            }
+            Err(Refusal::Broken(_)) => Ok(SCARD_E_NO_SERVICE as u32),
+            Err(refused) => Ok(status_for(&refused)),
+        }
     }
 
     /// One command APDU.
@@ -315,15 +331,15 @@ impl Link {
         let Some(held) = self.open.get_mut(&card) else {
             return Ok((SCARD_E_INVALID_HANDLE as u32, 0, Vec::new()));
         };
+        if !held.open() {
+            return Ok((SCARD_W_RESET_CARD as u32, 0, Vec::new()));
+        }
         if held.max_input() > 0 && command.len() > held.max_input() {
             return Ok((SCARD_E_INVALID_PARAMETER as u32, 0, Vec::new()));
         }
         match held.transmit(command) {
             Ok(answer) => Ok((SCARD_S_SUCCESS as u32, SCARD_PROTOCOL_T1, answer)),
-            Err(Refusal::Broken(reason)) => {
-                self.open.remove(&card);
-                Err(reason)
-            }
+            Err(Refusal::Broken(_)) => Ok((SCARD_E_NO_SERVICE as u32, 0, Vec::new())),
             Err(refused) => Ok((status_for(&refused), 0, Vec::new())),
         }
     }
@@ -381,12 +397,12 @@ impl Link {
         let Some(held) = self.open.get_mut(&card) else {
             return Ok(SCARD_E_INVALID_HANDLE as u32);
         };
+        if !held.open() {
+            return Ok(SCARD_W_RESET_CARD as u32);
+        }
         match exchange(held) {
             Ok(()) => Ok(SCARD_S_SUCCESS as u32),
-            Err(Refusal::Broken(reason)) => {
-                self.open.remove(&card);
-                Err(reason)
-            }
+            Err(Refusal::Broken(_)) => Ok(SCARD_E_NO_SERVICE as u32),
             Err(refused) => Ok(status_for(&refused)),
         }
     }
@@ -394,7 +410,7 @@ impl Link {
 
 /// `SCARD_E_UNSUPPORTED_FEATURE`, which the constants in `abi` do not carry
 /// because nothing else here answers it.
-const UNSUPPORTED_FEATURE: u32 = 0x8010_001F;
+const UNSUPPORTED_FEATURE: u32 = 0x8010_0022;
 
 /// How long a card request may sit before it is given up on. Long enough for a
 /// board that is loading firmware, short enough that a daemon which has stopped
@@ -403,6 +419,9 @@ const WAIT_SECONDS: u32 = 30;
 
 /// What the daemon's refusal means to an application.
 fn status_for(refused: &Refusal) -> u32 {
+    if let Some(code) = refused.scard_code() {
+        return code;
+    }
     match refused.code() {
         Some("unknown_tuner") => SCARD_E_UNKNOWN_READER as u32,
         Some("invalid_parameter") => SCARD_E_INVALID_PARAMETER as u32,
@@ -707,6 +726,9 @@ mod tests {
 
     #[derive(Default)]
     struct Listing {
+        connect_failures: AtomicUsize,
+        connect_drops: AtomicUsize,
+        event_failures: AtomicUsize,
         failures: AtomicUsize,
         attempts: AtomicUsize,
         status: AtomicUsize,
@@ -807,9 +829,40 @@ mod tests {
                     r#"[{{"id":"{slot}","reader":"{slot}","backend":"px4","board":"px4:A@1-2"}}]"#
                 )
             } else if request.starts_with(&format!("GET /cards/{slot}/events")) {
+                if listing
+                    .event_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    write_answer(
+                        reader.get_mut(),
+                        503,
+                        r#"{"error":{"code":"card_error","reason":"scard:80100017","message":"reader unavailable"}}"#,
+                    );
+                    continue;
+                }
                 r#"{"events":3,"changed":false,"present":true,"atr":"3B F0 11","sharing":1}"#
                     .to_owned()
             } else if request.starts_with(&format!("POST /cards/{slot}/connect")) {
+                if listing
+                    .connect_drops
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    return;
+                }
+                if listing
+                    .connect_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    write_answer(
+                        reader.get_mut(),
+                        503,
+                        r#"{"error":{"code":"card_error","reason":"scard:80100016","message":"try again"}}"#,
+                    );
+                    continue;
+                }
                 if holding {
                     write_answer(
                         reader.get_mut(),
@@ -1035,5 +1088,77 @@ mod tests {
         fake.listing.failures.store(1, Ordering::SeqCst);
         assert!(table.names(&cards).is_err());
         assert_eq!(fake.listing.attempts.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn invalid_reconnect_preserves_the_existing_session() {
+        let fake = start("invalid-reconnect");
+        let mut link = link(&fake);
+        let (card, _, _) = link
+            .connect_card(1, &fake.reader, 2, super::SCARD_PROTOCOL_T1)
+            .unwrap();
+        assert_eq!(
+            link.reconnect(card, 2, super::SCARD_PROTOCOL_T1, 3)
+                .unwrap()
+                .1,
+            super::UNSUPPORTED_FEATURE
+        );
+        assert_ne!(
+            link.reconnect(card, 99, super::SCARD_PROTOCOL_T1, 0)
+                .unwrap()
+                .1,
+            0
+        );
+        assert_eq!(fake.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            link.reconnect(card, 2, super::SCARD_PROTOCOL_T1, 0)
+                .unwrap()
+                .1,
+            0
+        );
+    }
+
+    #[test]
+    fn failed_reconnect_can_be_retried_with_the_same_handle() {
+        for drop_connection in [false, true] {
+            let fake = start(if drop_connection {
+                "broken-reconnect"
+            } else {
+                "refused-reconnect"
+            });
+            let mut link = link(&fake);
+            let (card, _, _) = link
+                .connect_card(1, &fake.reader, 2, super::SCARD_PROTOCOL_T1)
+                .unwrap();
+            if drop_connection {
+                fake.listing.connect_drops.store(1, Ordering::SeqCst);
+            } else {
+                fake.listing.connect_failures.store(1, Ordering::SeqCst);
+            }
+            assert_ne!(
+                link.reconnect(card, 2, super::SCARD_PROTOCOL_T1, 1)
+                    .unwrap()
+                    .1,
+                0
+            );
+            assert_eq!(link.status(card).unwrap(), super::SCARD_W_RESET_CARD as u32);
+            assert_eq!(
+                link.reconnect(card, 2, super::SCARD_PROTOCOL_T1, 1)
+                    .unwrap()
+                    .1,
+                0
+            );
+            assert_eq!(link.disconnect(card, 0).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn status_preserves_the_reader_failure() {
+        let fake = start("status-failure");
+        let mut link = link(&fake);
+        let (card, _, _) = link
+            .connect_card(1, &fake.reader, 2, super::SCARD_PROTOCOL_T1)
+            .unwrap();
+        fake.listing.event_failures.store(1, Ordering::SeqCst);
+        assert_eq!(link.status(card).unwrap(), 0x8010_0017);
     }
 }
