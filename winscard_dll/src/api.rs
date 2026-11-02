@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::abi::*;
 use crate::link::{Link, Watch};
+use crate::routing::{self, ReaderRoute};
 use crate::state::{self, Card, CardCall, Context};
 use crate::system::system;
 use crate::wire::{self, ReaderState};
@@ -154,32 +155,13 @@ pub unsafe extern "system" fn SCardListReadersA(
             None => SCARD_E_NO_SERVICE,
         };
     };
-    let mut names = ours
-        .readers()
-        .into_iter()
-        .map(|one| one.name)
-        .collect::<Vec<_>>();
-    coax_settings::trace!("winscard: listing, {} built-in", names.len());
-    let mut theirs = SCARD_S_SUCCESS;
-    if ours.system != 0 {
-        if let Some(list) = system().list_readers_a {
-            let (status, more) = unsafe { system_readers_a(ours.system, groups, list) };
-            theirs = status;
-            coax_settings::trace!(
-                "winscard: the system answered {status:#010x} with {} reader(s)",
-                more.len()
-            );
-            names.extend(more);
-        }
-    } else {
-        coax_settings::trace!("winscard: no system context on this one");
-    }
-    // With nothing of our own to add, the system's answer is the answer -- its
-    // refusal included, so that an application sees what it would have seen
-    // had this library not been in the directory.
-    if names.is_empty() && theirs != SCARD_S_SUCCESS {
-        return theirs;
-    }
+    let names = match reader_names(&ours, || match system().list_readers_a {
+        Some(list) => unsafe { system_readers_a(ours.system, groups, list) },
+        None => (SCARD_S_SUCCESS, Vec::new()),
+    }) {
+        Ok(names) => names,
+        Err(status) => return status,
+    };
     unsafe { write_multi_a(&names, readers, length) }
 }
 
@@ -196,33 +178,49 @@ pub unsafe extern "system" fn SCardListReadersW(
             None => SCARD_E_NO_SERVICE,
         };
     };
-    let mut names = ours
-        .readers()
+    let names = match reader_names(&ours, || match system().list_readers_w {
+        Some(list) => unsafe { system_readers_w(ours.system, groups, list) },
+        None => (SCARD_S_SUCCESS, Vec::new()),
+    }) {
+        Ok(names) => names,
+        Err(status) => return status,
+    };
+    unsafe { write_multi_w(&names, readers, length) }
+}
+
+/// Collect built-in and system readers once, with the same failure semantics
+/// for both string encodings. The caller supplies the encoding-specific query.
+fn reader_names(
+    context: &Context,
+    system_readers: impl FnOnce() -> (Status, Vec<String>),
+) -> Result<Vec<String>, Status> {
+    let listed = context.readers();
+    let unavailable = listed.is_none();
+    let mut names = listed
+        .unwrap_or_default()
         .into_iter()
         .map(|one| one.name)
         .collect::<Vec<_>>();
     coax_settings::trace!("winscard: listing, {} built-in", names.len());
-    let mut theirs = SCARD_S_SUCCESS;
-    if ours.system != 0 {
-        if let Some(list) = system().list_readers_w {
-            let (status, more) = unsafe { system_readers_w(ours.system, groups, list) };
-            theirs = status;
-            coax_settings::trace!(
-                "winscard: the system answered {status:#010x} with {} reader(s)",
-                more.len()
-            );
-            names.extend(more);
-        }
+    let theirs = if context.system != 0 {
+        let (status, more) = system_readers();
+        coax_settings::trace!(
+            "winscard: the system answered {status:#010x} with {} reader(s)",
+            more.len()
+        );
+        names.extend(more);
+        status
     } else {
         coax_settings::trace!("winscard: no system context on this one");
+        SCARD_S_SUCCESS
+    };
+    if names.is_empty() && unavailable {
+        return Err(SCARD_E_NO_SERVICE);
     }
-    // With nothing of our own to add, the system's answer is the answer -- its
-    // refusal included, so that an application sees what it would have seen
-    // had this library not been in the directory.
     if names.is_empty() && theirs != SCARD_S_SUCCESS {
-        return theirs;
+        return Err(theirs);
     }
-    unsafe { write_multi_w(&names, readers, length) }
+    Ok(names)
 }
 
 #[unsafe(no_mangle)]
@@ -371,18 +369,15 @@ unsafe fn connect(
             connect_through_system(context, &named, share, protocols, card, active, wide)
         };
     };
-    match ours.knows(&named) {
-        Some(true) => {}
-        // The daemon could not be asked, so whether the reader is one of its
-        // own is not known. Saying it does not exist is what makes an
-        // application stop looking for it.
-        None if ours.system == 0 => return SCARD_E_NO_SERVICE,
-        _ if ours.system == 0 => return SCARD_E_UNKNOWN_READER,
-        _ => {
+    match reader_route(&ours, &named, ours.knows(&named)) {
+        Ok(ReaderRoute::BuiltIn) => {}
+        Ok(ReaderRoute::System) if ours.system == 0 => return SCARD_E_UNKNOWN_READER,
+        Ok(ReaderRoute::System) => {
             return unsafe {
                 connect_through_system(ours.system, &named, share, protocols, card, active, wide)
             };
         }
+        Err(status) => return status,
     }
     let Some((handle, agreed, result)) =
         ours.with_session(|link, remote| link.connect_card(remote, &named, share, protocols))
@@ -754,7 +749,7 @@ fn look_at_card(card: &Card) -> Option<ReaderState> {
     let remote = card.remote;
     on_card(card, |link| link.status(remote)).ok()?;
     card.context
-        .readers()
+        .readers()?
         .into_iter()
         .find(|reader| reader.name == card.reader)
 }
@@ -981,20 +976,36 @@ fn wait_for_change(context: &Context, timeout: u32, entries: &mut impl Entries) 
     let names: Vec<Option<String>> = (0..entries.count())
         .map(|index| entries.name(index))
         .collect();
-    let watched: Vec<usize> = names
+    let needs_listing = |index: usize, name: &Option<String>| {
+        entries.current(index) & SCARD_STATE_IGNORE == 0
+            && name.as_deref().is_some_and(|name| name != PNP_NOTIFICATION)
+    };
+    let listed = if names
         .iter()
         .enumerate()
-        .filter(|(index, name)| {
-            entries.current(*index) & SCARD_STATE_IGNORE == 0
-                && name
-                    .as_deref()
-                    .is_some_and(|name| name != PNP_NOTIFICATION && context.owns(name))
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let elsewhere: Vec<usize> = (0..names.len())
-        .filter(|index| !watched.contains(index))
-        .collect();
+        .any(|(i, name)| needs_listing(i, name))
+    {
+        context.readers()
+    } else {
+        Some(Vec::new())
+    };
+    let mut watched = Vec::new();
+    let mut elsewhere = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        if !needs_listing(index, name) {
+            elsewhere.push(index);
+            continue;
+        }
+        let name = name.as_deref().unwrap();
+        let known = listed
+            .as_ref()
+            .map(|readers| readers.iter().any(|one| one.name == name));
+        match reader_route(context, name, known) {
+            Ok(ReaderRoute::BuiltIn) => watched.push(index),
+            Ok(ReaderRoute::System) => elsewhere.push(index),
+            Err(status) => return status,
+        }
+    }
 
     // Nothing of ours is in the array, so there is nothing for this library to
     // add: the system library waits on its own readers with the timeout it was
@@ -1023,7 +1034,9 @@ fn wait_for_change(context: &Context, timeout: u32, entries: &mut impl Entries) 
     if !watched.is_empty() {
         let settled = Instant::now() + SETTLE;
         while Instant::now() < settled {
-            let seen = context.readers();
+            let Some(seen) = context.readers() else {
+                return SCARD_E_NO_SERVICE;
+            };
             let all_measured = watched.iter().all(|index| {
                 let name = names[*index].as_deref().unwrap_or_default();
                 seen.iter()
@@ -1045,7 +1058,9 @@ fn wait_for_change(context: &Context, timeout: u32, entries: &mut impl Entries) 
         }
         let mut changed = false;
         if !watched.is_empty() {
-            let seen = context.readers();
+            let Some(seen) = context.readers() else {
+                return SCARD_E_NO_SERVICE;
+            };
             for index in &watched {
                 let name = names[*index].as_deref().unwrap_or_default();
                 let (mut event, atr) = match seen.iter().find(|reader| reader.name == name) {
@@ -1081,6 +1096,23 @@ fn wait_for_change(context: &Context, timeout: u32, entries: &mut impl Entries) 
         }
         std::thread::sleep(LOOK_AGAIN);
     }
+}
+
+fn reader_route(
+    context: &Context,
+    name: &str,
+    built_in: Option<bool>,
+) -> Result<ReaderRoute, Status> {
+    routing::resolve(built_in, || {
+        if context.system == 0 {
+            return false;
+        }
+        let Some(list) = system().list_readers_w else {
+            return false;
+        };
+        let (status, readers) = unsafe { system_readers_w(context.system, std::ptr::null(), list) };
+        status == SCARD_S_SUCCESS && readers.iter().any(|reader| reader == name)
+    })
 }
 
 /// The `SCARD_STATE_*` flags for a reader the daemon publishes.

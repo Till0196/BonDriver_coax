@@ -500,6 +500,11 @@ const LINGER: Duration = Duration::from_secs(5);
 /// second.
 const LISTING_STANDS: Duration = Duration::from_secs(1);
 
+/// The listener may answer before the first hardware enumeration succeeds.
+/// Retry only an initial transient failure, without caching an empty listing.
+const LISTING_SETTLE: Duration = Duration::from_millis(2500);
+const LISTING_RETRY: Duration = Duration::from_millis(200);
+
 /// How long one request asks the daemon to hold a wait open for. The daemon has
 /// a ceiling of its own and answers sooner.
 const WATCH_SECONDS: u32 = 60;
@@ -512,7 +517,7 @@ fn table() -> &'static Table {
 impl Table {
     /// The reader names, asking the daemon when what is held has gone stale.
     fn names(&self, cards: &Cards) -> io::Result<Vec<String>> {
-        {
+        let first_listing = {
             let held = self.inner.lock().map_err(poisoned)?;
             if held
                 .listed
@@ -520,11 +525,41 @@ impl Table {
             {
                 return Ok(held.names.clone());
             }
-        }
-        let listed = match cards.list() {
-            Ok(listed) => listed,
-            Err(Refusal::Broken(reason)) => return Err(reason),
-            Err(refused) => return Err(io::Error::other(refused.to_string())),
+            held.listed.is_none()
+        };
+        let deadline = Instant::now() + LISTING_SETTLE;
+        let mut retrying = false;
+        let listed = loop {
+            match cards.list() {
+                Ok(listed) => break listed,
+                Err(refused) => {
+                    let transient = match &refused {
+                        Refusal::Refused { status, .. } => matches!(status, 502..=504),
+                        Refusal::Broken(reason) => !matches!(
+                            reason.kind(),
+                            io::ErrorKind::InvalidInput
+                                | io::ErrorKind::InvalidData
+                                | io::ErrorKind::PermissionDenied
+                                | io::ErrorKind::Unsupported
+                        ),
+                    };
+                    if !first_listing || !transient || Instant::now() >= deadline {
+                        return match refused {
+                            Refusal::Broken(reason) => Err(reason),
+                            refused => Err(io::Error::other(refused.to_string())),
+                        };
+                    }
+                    if !retrying {
+                        coax_settings::trace!(
+                            "winscard: retrying initial reader listing: {refused}"
+                        );
+                        retrying = true;
+                    }
+                    std::thread::sleep(
+                        LISTING_RETRY.min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                }
+            }
         };
         let names: Vec<String> = listed.into_iter().map(|one| one.reader).collect();
         let mut held = self.inner.lock().map_err(poisoned)?;
@@ -666,7 +701,15 @@ mod tests {
         path: String,
         reader: String,
         opens: Arc<AtomicUsize>,
+        listing: Arc<Listing>,
         sent: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[derive(Default)]
+    struct Listing {
+        failures: AtomicUsize,
+        attempts: AtomicUsize,
+        status: AtomicUsize,
     }
 
     /// Each test names its slot differently. The table these read through is
@@ -681,6 +724,9 @@ mod tests {
 
         let listener = UnixListener::bind(&path).expect("the socket can be bound");
         let opens = Arc::new(AtomicUsize::new(0));
+        let listing = Arc::new(Listing::default());
+        listing.status.store(503, Ordering::SeqCst);
+        let listings = Arc::clone(&listing);
         let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
         let counted = Arc::clone(&opens);
         let recorded = Arc::clone(&sent);
@@ -691,13 +737,17 @@ mod tests {
                 let counted = Arc::clone(&counted);
                 let recorded = Arc::clone(&recorded);
                 let named = named.clone();
-                std::thread::spawn(move || answer(connection, &named, &counted, &recorded));
+                let listings = Arc::clone(&listings);
+                std::thread::spawn(move || {
+                    answer(connection, &named, &counted, &recorded, &listings)
+                });
             }
         });
         Fake {
             path,
             reader: reader.to_owned(),
             opens,
+            listing,
             sent,
         }
     }
@@ -709,6 +759,7 @@ mod tests {
         slot: &str,
         opens: &AtomicUsize,
         sent: &std::sync::Mutex<Vec<String>>,
+        listing: &Listing,
     ) {
         let mut reader = BufReader::new(connection);
         let mut holding = false;
@@ -739,6 +790,19 @@ mod tests {
 
             let request = request.trim_end().to_owned();
             let answer = if request.starts_with("GET /cards ") {
+                listing.attempts.fetch_add(1, Ordering::SeqCst);
+                if listing
+                    .failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    write_answer(
+                        reader.get_mut(),
+                        listing.status.load(Ordering::SeqCst) as u16,
+                        r#"{"error":{"code":"temporary_error","message":"enumeration is not ready"}}"#,
+                    );
+                    continue;
+                }
                 format!(
                     r#"[{{"id":"{slot}","reader":"{slot}","backend":"px4","board":"px4:A@1-2"}}]"#
                 )
@@ -922,5 +986,54 @@ mod tests {
             u32::from_le_bytes(room.try_into().expect("four bytes")),
             260
         );
+    }
+
+    #[test]
+    fn initial_listing_recovers_from_transient_failures() {
+        let fake = start("startup-listing");
+        fake.listing.failures.store(2, Ordering::SeqCst);
+        let table = super::Table::default();
+        let cards = coax::card::Cards::new(Endpoint::Socket(fake.path.clone()));
+        assert_eq!(table.names(&cards).unwrap(), vec![fake.reader.clone()]);
+        assert_eq!(fake.listing.attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(table.names(&cards).unwrap(), vec![fake.reader]);
+        assert_eq!(fake.listing.attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_permanent_listing_failure_is_not_retried_or_cached_as_empty() {
+        let fake = start("permanent-listing");
+        fake.listing.failures.store(1, Ordering::SeqCst);
+        fake.listing.status.store(404, Ordering::SeqCst);
+        let table = super::Table::default();
+        let cards = coax::card::Cards::new(Endpoint::Socket(fake.path.clone()));
+        assert!(table.names(&cards).is_err());
+        assert_eq!(fake.listing.attempts.load(Ordering::SeqCst), 1);
+        assert!(table.inner.lock().unwrap().listed.is_none());
+        assert_eq!(table.names(&cards).unwrap(), vec![fake.reader]);
+    }
+
+    #[test]
+    fn initial_listing_retries_are_bounded() {
+        let fake = start("unavailable-listing");
+        fake.listing.failures.store(usize::MAX, Ordering::SeqCst);
+        let table = super::Table::default();
+        let cards = coax::card::Cards::new(Endpoint::Socket(fake.path.clone()));
+        assert!(table.names(&cards).is_err());
+        assert!(fake.listing.attempts.load(Ordering::SeqCst) > 1);
+        assert!(table.inner.lock().unwrap().listed.is_none());
+    }
+
+    #[test]
+    fn a_later_listing_failure_does_not_enter_the_startup_retry() {
+        let fake = start("later-listing");
+        let table = super::Table::default();
+        let cards = coax::card::Cards::new(Endpoint::Socket(fake.path.clone()));
+        assert_eq!(table.names(&cards).unwrap(), vec![fake.reader]);
+        table.inner.lock().unwrap().listed =
+            Some(std::time::Instant::now() - super::LISTING_STANDS);
+        fake.listing.failures.store(1, Ordering::SeqCst);
+        assert!(table.names(&cards).is_err());
+        assert_eq!(fake.listing.attempts.load(Ordering::SeqCst), 2);
     }
 }

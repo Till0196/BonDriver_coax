@@ -28,6 +28,7 @@ mod api;
 mod link;
 #[cfg(windows)]
 mod passthrough;
+mod routing;
 #[cfg(windows)]
 mod state;
 #[cfg(windows)]

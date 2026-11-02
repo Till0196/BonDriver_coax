@@ -198,21 +198,15 @@ impl Context {
             .unwrap_or_default()
     }
 
-    /// The built-in readers, or none when the daemon is not there.
-    pub fn readers(&self) -> Vec<ReaderState> {
+    /// A successful listing may be empty; a failed listing remains unknown.
+    pub fn readers(&self) -> Option<Vec<ReaderState>> {
         self.with_session(|link, _| link.readers())
-            .unwrap_or_default()
-    }
-
-    /// Whether a reader name is one of the daemon's rather than the system's.
-    pub fn owns(&self, reader: &str) -> bool {
-        self.knows(reader) == Some(true)
     }
 
     /// Whether the daemon lists this reader, or `None` when it could not be
     /// asked.
     pub fn knows(&self, reader: &str) -> Option<bool> {
-        self.with_session(|link, _| link.readers())
+        self.readers()
             .map(|readers| readers.iter().any(|known| known.name == reader))
     }
 
