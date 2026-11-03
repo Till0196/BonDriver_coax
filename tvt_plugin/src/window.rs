@@ -77,10 +77,19 @@ pub struct SettingsFiles {
 /// and the columns a viewer reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteShown {
+    /// The delivery system used to filter tuner candidates.
+    pub delivery: String,
     pub label: String,
     pub system: String,
     /// The tuners it is on and, where it has them, the bands it walks.
     pub rest: String,
+}
+
+/// A scan candidate, retaining the daemon's delivery information.
+#[derive(Debug, Clone)]
+pub struct TunerShown {
+    pub tuner: coax::daemon::Tuner,
+    pub shown: String,
 }
 
 /// Says what is being looked at now, from whichever thread the work is on.
@@ -149,7 +158,7 @@ pub fn starting() {
 
 #[cfg(windows)]
 mod windows {
-    use super::{Buttons, PROGRESS, RouteShown, SettingsFiles};
+    use super::{Buttons, PROGRESS, RouteShown, SettingsFiles, TunerShown};
     use std::sync::Mutex;
 
     use coax_settings::wide::Wide;
@@ -219,7 +228,10 @@ mod windows {
     /// The tuners the drop-down offers, in the order it offers them: what to
     /// ask the daemon for, and what a viewer reads. The first line is "whatever
     /// the settings say".
-    static TUNERS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    static TUNERS: Mutex<Vec<TunerShown>> = Mutex::new(Vec::new());
+    /// Candidate identifiers for the controls currently drawn, before a new
+    /// asynchronous listing replaces TUNERS.
+    static DRAWN_TUNERS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
     /// The settings files to choose between, which one is in use, and what to
     /// call when a viewer picks another.
     static FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -262,7 +274,7 @@ mod windows {
         act: fn(i32),
         routes: Vec<RouteShown>,
         trouble: Option<String>,
-        tuners: Vec<(String, String)>,
+        tuners: Vec<TunerShown>,
         files: SettingsFiles,
     ) {
         *BUTTONS.lock().expect("the buttons are not poisoned") = Some(buttons);
@@ -358,28 +370,38 @@ mod windows {
 
     /// Puts the tuners in one route's drop-down, with what the settings say
     /// at the top and whatever was already chosen for that route kept.
-    fn fill_tuners(window: Handle, at: usize, label: &str) {
+    fn fill_tuners(window: Handle, at: usize, route: &RouteShown) {
         let list = item(window, ID_ROUTE_TUNER + at);
         if list.is_null() {
             return;
         }
         unsafe { SendMessageW(list, CB_RESETCONTENT, 0, 0) };
         let tuners = TUNERS.lock().expect("the tuners are not poisoned");
-        let names = std::iter::once("設定に従う".to_owned())
-            .chain(tuners.iter().map(|(_, shown)| shown.clone()));
-        for name in names {
-            let text = Wide::new(&name);
-            unsafe { SendMessageW(list, CB_ADDSTRING, 0, text.as_ptr() as isize) };
+        let default = Wide::new("設定に従う");
+        unsafe { SendMessageW(list, CB_ADDSTRING, 0, default.as_ptr() as isize) };
+        let chosen = CHOSEN.lock().expect("the choices are not poisoned");
+        let chosen_id = chosen.iter().find(|(label, _)| label == &route.label);
+        let mut put_back = 0;
+        let mut ids = Vec::new();
+        for candidate in tuners.iter() {
+            if !candidate.tuner.receives(&route.delivery) {
+                continue;
+            }
+            let text = Wide::new(&candidate.shown);
+            let row = unsafe { SendMessageW(list, CB_ADDSTRING, 0, text.as_ptr() as isize) };
+            if row < 0 {
+                continue;
+            }
+            ids.push(candidate.tuner.id.clone());
+            if chosen_id.is_some_and(|(_, id)| id == &candidate.tuner.id) {
+                put_back = row as usize;
+            }
         }
-        // What the viewer chose for this route survives the list arriving
-        // afterwards, and the row being made again.
-        let put_back = CHOSEN
+        let mut drawn = DRAWN_TUNERS
             .lock()
-            .expect("the choices are not poisoned")
-            .iter()
-            .find(|(named, _)| named == label)
-            .and_then(|(_, id)| tuners.iter().position(|(known, _)| known == id))
-            .map_or(0, |at| at + 1);
+            .expect("the candidates are not poisoned");
+        drawn.resize_with(at + 1, Vec::new);
+        drawn[at] = ids;
         unsafe { SendMessageW(list, CB_SETCURSEL, put_back, 0) };
     }
 
@@ -387,7 +409,9 @@ mod windows {
     /// the rows can be made again without losing it.
     fn remember_tuners(window: Handle) {
         let drawn = DRAWN.lock().expect("the drawn routes are not poisoned");
-        let tuners = TUNERS.lock().expect("the tuners are not poisoned");
+        let candidates = DRAWN_TUNERS
+            .lock()
+            .expect("the candidates are not poisoned");
         let mut chosen = CHOSEN.lock().expect("the choices are not poisoned");
         for (at, label) in drawn.iter().enumerate().take(MOST_ROUTES) {
             let list = item(window, ID_ROUTE_TUNER + at);
@@ -397,7 +421,10 @@ mod windows {
             let picked = unsafe { SendMessageW(list, CB_GETCURSEL, 0, 0) };
             chosen.retain(|(named, _)| named != label);
             if picked > 0 {
-                if let Some((id, _)) = tuners.get(picked as usize - 1) {
+                if let Some(id) = candidates
+                    .get(at)
+                    .and_then(|ids| ids.get(picked as usize - 1))
+                {
                     chosen.push((label.clone(), id.clone()));
                 }
             }
@@ -406,7 +433,7 @@ mod windows {
 
     /// Puts a list of tuners in front of the viewer, from whichever thread
     /// found them out.
-    pub fn set_tuners(names: Vec<(String, String)>) {
+    pub fn set_tuners(names: Vec<TunerShown>) {
         *TUNERS.lock().expect("the tuners are not poisoned") = names;
         let window = held(&BUTTONS_WINDOW);
         if there(window) {
@@ -590,7 +617,7 @@ mod windows {
                 (m.margin + inner - tuner_wide, y, tuner_wide, m.row * 12),
                 ID_ROUTE_TUNER + at,
             );
-            fill_tuners(window, at, &route.label);
+            fill_tuners(window, at, route);
             y += field;
         }
         y += m.gap;
@@ -1021,7 +1048,7 @@ pub use windows::{
 
 #[cfg(not(windows))]
 mod elsewhere {
-    use super::{Buttons, RouteShown, SettingsFiles};
+    use super::{Buttons, RouteShown, SettingsFiles, TunerShown};
     use core::ffi::c_void;
 
     pub fn open(
@@ -1030,7 +1057,7 @@ mod elsewhere {
         _act: fn(i32),
         _routes: Vec<RouteShown>,
         _trouble: Option<String>,
-        _tuners: Vec<(String, String)>,
+        _tuners: Vec<TunerShown>,
         _files: SettingsFiles,
     ) {
     }
@@ -1041,7 +1068,7 @@ mod elsewhere {
     pub fn chosen_routes() -> crate::discover::What {
         crate::discover::What::Everything
     }
-    pub fn set_tuners(_names: Vec<(String, String)>) {}
+    pub fn set_tuners(_names: Vec<TunerShown>) {}
     pub fn set_routes(_routes: Vec<RouteShown>, _trouble: Option<String>) {}
     pub fn open_sweep(_owner: *mut c_void, _stop: fn(), _done: fn()) {}
     pub fn close() {}

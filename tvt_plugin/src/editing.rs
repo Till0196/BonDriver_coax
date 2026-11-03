@@ -228,6 +228,14 @@ impl Editing {
         self.setup().write_into(&self.text)
     }
 
+    /// Unknown capabilities remain available for every delivery system.
+    /// Use the daemon's report, before routes add their own declarations.
+    pub fn tuner_receives(&self, index: usize, system: &str) -> bool {
+        let tuner = &self.tuners[index];
+        let deliveries = self.listed.told(&tuner.id).unwrap_or(&tuner.deliveries);
+        deliveries.is_empty() || deliveries.iter().any(|one| delivery::same(one, system))
+    }
+
     /// What a tuner is set to, as the file says: its own line, or a pattern
     /// that names it.
     pub fn setting_of(&self, tuner: usize) -> TunerSetting {
@@ -468,6 +476,31 @@ mod tests {
                 &[],
             )),
         )
+    }
+
+    #[test]
+    fn candidates_use_reported_capabilities_and_keep_unknown_bda_tuners() {
+        let listed = Listed::of(
+            vec![board(
+                "usb:a",
+                vec![
+                    tuner("usb:a:0", "Test terrestrial tuner", &["ISDB-T"]),
+                    tuner("bda:a:0", "BDA", &[]),
+                    tuner("bda:b:0", "Cable", &["DVBC/ANNEX_A"]),
+                ],
+                &Controls::default(),
+            )],
+            &[("ISDBC".to_owned(), vec!["usb:*".to_owned()])],
+        );
+        let editing = Editing::open(PathBuf::new(), String::new(), Some(listed));
+        assert!(editing.tuner_receives(0, "ISDBT"));
+        assert!(!editing.tuner_receives(0, "ISDBC"));
+        assert!(!editing.tuner_receives(0, "ISDBS"));
+        for (system, _) in coax::delivery::OFFERED {
+            assert!(editing.tuner_receives(1, system));
+        }
+        assert!(editing.tuner_receives(2, "ISDBC"));
+        assert!(!editing.tuner_receives(2, "ISDBT"));
     }
 
     #[test]

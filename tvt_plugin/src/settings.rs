@@ -1083,6 +1083,59 @@ mod windows {
             win::enable(window, ID_R_BAND + at, walked);
         }
         win::enable(window, ID_R_BANDS_LABEL, walked);
+        // Keep only candidates for this delivery system, including tuners
+        // whose driver did not report any capabilities. Reflow the visible
+        // rows within the reserved tuner area when the system changes.
+        with_editing(|editing| {
+            let m = win::metrics();
+            let inner = route_wide(&m, editing) - m.margin * 2;
+            let (lnb_wide, gain_wide) = control_columns(&m);
+            let lnb_x = m.margin + inner - lnb_wide - gain_wide - m.gap;
+            let gain_x = m.margin + inner - gain_wide;
+            let lines = tuner_lines(editing);
+            let mut y = m.margin + (m.row + 4 + m.gap) * 2 + m.row;
+            for (row, (tuner, _)) in lines.iter().enumerate() {
+                let visible = match tuner {
+                    Some(index) => editing.tuner_receives(*index, &system),
+                    None => lines[row + 1..]
+                        .iter()
+                        .take_while(|(tuner, _)| tuner.is_some())
+                        .any(|(tuner, _)| editing.tuner_receives(tuner.unwrap(), &system)),
+                };
+                let positions = match tuner {
+                    Some(index) => vec![
+                        (ID_R_TUNER + index, m.margin + m.line * 2),
+                        (ID_R_LNB + index, lnb_x),
+                        (ID_R_GAIN + index, gain_x),
+                    ],
+                    None => vec![(ID_R_CARD + row, m.margin + m.line)],
+                };
+                for (id, x) in positions {
+                    win::show(window, id, visible);
+                    let child = item(window, id);
+                    if visible && !child.is_null() {
+                        unsafe {
+                            win::SetWindowPos(
+                                child,
+                                core::ptr::null_mut(),
+                                x,
+                                y,
+                                0,
+                                0,
+                                0x0001 | 0x0004,
+                            )
+                        };
+                    }
+                }
+                if visible {
+                    y += if tuner.is_some() {
+                        tuner_high(&m, editing)
+                    } else {
+                        m.row
+                    };
+                }
+            }
+        });
         // A supply only on a satellite's lead, and a gain only where the
         // amplifier is in front of this system.
         with_editing(|editing| {

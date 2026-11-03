@@ -416,6 +416,7 @@ fn routes_shown(host: Host) -> (Vec<window::RouteShown>, Option<String>) {
             window::RouteShown {
                 label: route.label,
                 system: coax::delivery::shown(&route.system),
+                delivery: route.system,
                 rest,
             }
         })
@@ -510,7 +511,7 @@ fn tuner_state() -> Vec<state::Shown> {
 /// What the daemon has, for the drop-down. The daemon is started if it is not
 /// answering and the settings allow it: a viewer opening this window is about
 /// to ask for a sweep.
-fn tuners() -> Vec<(String, String)> {
+fn tuners() -> Vec<window::TunerShown> {
     let Some(host) = *STATE.lock().expect("the state is not poisoned") else {
         return Vec::new();
     };
@@ -534,7 +535,7 @@ fn tuners() -> Vec<(String, String)> {
 /// A tuner as a viewer reads it: what the daemon calls it, and what it
 /// receives. The identifier alone says which card only to whoever set the
 /// machine up.
-fn named(tuner: coax::daemon::Tuner) -> (String, String) {
+fn named(tuner: coax::daemon::Tuner) -> window::TunerShown {
     /// How many delivery systems to spell out. A card that receives everything
     /// would fill the line and say nothing by it.
     const MOST_SHOWN: usize = 4;
@@ -555,7 +556,7 @@ fn named(tuner: coax::daemon::Tuner) -> (String, String) {
             shown.push_str(" …");
         }
     }
-    (tuner.id, shown)
+    window::TunerShown { tuner, shown }
 }
 
 /// What a button in either window means: the same as the command of that name.
