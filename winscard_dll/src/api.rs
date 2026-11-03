@@ -43,8 +43,11 @@ pub static g_rgSCardRawPci: IoRequest = IoRequest {
 /// The group a reader is in when nobody arranged any.
 const DEFAULT_READER_GROUP: &str = "SCard$DefaultReaders";
 
-/// How long to give the daemon to take its first look at a slot.
-const SETTLE: Duration = Duration::from_millis(2500);
+/// How long to give the daemon to take its first look at a slot. The look
+/// opens the board, and a board brought up from cold -- firmware, front ends
+/// and the card interface -- takes several seconds before its slot can be
+/// read. The wait ends as soon as the slot has been read.
+const SETTLE: Duration = Duration::from_secs(10);
 
 /// How long to wait between looks while a `SCardGetStatusChange` is running.
 /// Card movement is not an interrupt on any of these interfaces, so a wait is
