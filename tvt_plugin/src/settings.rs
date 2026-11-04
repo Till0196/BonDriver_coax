@@ -98,6 +98,9 @@ mod windows {
     const ID_R_LNB: usize = 800;
     const ID_R_GAIN: usize = 900;
     const ID_R_LOOP: usize = 3000;
+    /// What stands in a tuner's supply column when the supply is set on a
+    /// tuner above it.
+    const ID_R_LNB_SHARED: usize = 3100;
     const ID_R_LNB_LABEL: usize = 510;
     const ID_R_GAIN_LABEL: usize = 511;
     const ID_R_LOOP_LABEL: usize = 512;
@@ -1038,7 +1041,7 @@ mod windows {
                     "（上と共通）",
                     SS_CENTERIMAGE,
                     (lnb_x, y, lnb_wide, m.row + 4),
-                    0,
+                    ID_R_LNB_SHARED + index,
                 );
             }
         }
@@ -1138,6 +1141,7 @@ mod windows {
                     Some(index) => vec![
                         (ID_R_TUNER + index, m.margin + m.line * 2),
                         (ID_R_LNB + index, lnb_x),
+                        (ID_R_LNB_SHARED + index, lnb_x),
                         (ID_R_GAIN + index, gain_x),
                         (ID_R_LOOP + index, loop_x),
                     ],
