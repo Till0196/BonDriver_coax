@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `[TunerSettings]`: what a viewer set for a tuner beside the channel -- the
-//! supply on a dish's lead and the front end's gain -- and what of it a tune
-//! takes.
+//! supply on a dish's lead, the front end's gain and the tuner's own
+//! loop-through output -- and what of it a tune takes.
 //!
 //! A line names its tuners the way a route of `[Tuners]` does, by identifier
 //! or by pattern (`model:` included), and says what to add:
@@ -12,6 +12,7 @@
 //! [TunerSettings]
 //! pt3:6-17-0-0:0       = lnb=high
 //! model:TBS 6205se*    = gain=auto
+//! px3:p1-14.1:0        = loop_through=low
 //! ```
 //!
 //! What goes to the daemon is held back to what the tuner says it can set (its
@@ -29,7 +30,7 @@ pub struct TunerSettings {
 }
 
 impl TunerSettings {
-    /// Reads one line, `pattern = lnb=..., gain=...`. A field this does not know,
+    /// Reads one line, `pattern = lnb=..., gain=..., loop_through=...`. A field this does not know,
     /// or a value it cannot read, is left out rather than refused: what is left
     /// is still worth applying. A line left with nothing in it stands for the
     /// tuner's own defaults, over any pattern after it that names the tuner.
@@ -54,6 +55,11 @@ impl TunerSettings {
                 "gain" => {
                     if let Some(gain) = gain_value(value) {
                         setting.gain = gain;
+                    }
+                }
+                "loop_through" => {
+                    if let Some(level) = loop_through_level(value) {
+                        setting.loop_through = level.to_owned();
                     }
                 }
                 _ => {}
@@ -113,7 +119,7 @@ impl TunerSettings {
     pub fn render(&self) -> String {
         let mut text = String::from("[TunerSettings]\n");
         text.push_str(
-            "; チューナー = lnb=off|low|high, gain=auto|min|max|+NdB（空はそのチューナーの既定）\n",
+            "; チューナー = lnb=off|low|high, gain=auto|min|max|+NdB, loop_through=max|high|mid|low（空はそのチューナーの既定）\n",
         );
         let wide = self
             .lines
@@ -128,6 +134,9 @@ impl TunerSettings {
             }
             if !setting.gain.is_empty() {
                 fields.push(format!("gain={}", setting.gain));
+            }
+            if !setting.loop_through.is_empty() {
+                fields.push(format!("loop_through={}", setting.loop_through));
             }
             let mut padded = crate::syntax::quote(pattern);
             for _ in pattern.chars().count()..wide {
@@ -144,7 +153,9 @@ impl TunerSettings {
 }
 
 fn said_nothing(setting: &TunerSetting) -> bool {
-    setting.lnb.trim().is_empty() && setting.gain.trim().is_empty()
+    setting.lnb.trim().is_empty()
+        && setting.gain.trim().is_empty()
+        && setting.loop_through.trim().is_empty()
 }
 
 /// The supply levels `lnb_power` takes.
@@ -153,6 +164,17 @@ fn lnb_level(value: &str) -> Option<&'static str> {
         "off" => Some("off"),
         "low" => Some("low"),
         "high" => Some("high"),
+        _ => None,
+    }
+}
+
+/// The levels `loop_through` takes.
+fn loop_through_level(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "max" => Some("max"),
+        "high" => Some("high"),
+        "mid" => Some("mid"),
+        "low" => Some("low"),
         _ => None,
     }
 }
@@ -334,6 +356,7 @@ fn takes(controls: &Controls, system: &str, name: &str, value: &str) -> bool {
             };
             on_this && step
         }),
+        "loop_through" => controls.loop_through.is_some(),
         _ => false,
     }
 }
@@ -341,7 +364,7 @@ fn takes(controls: &Controls, system: &str, name: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Listed, TunerSettings, decibels, told_to};
-    use coax::daemon::{Board, Controls, GainControl, Held, LnbControl, Tuner};
+    use coax::daemon::{Board, Controls, GainControl, Held, LnbControl, LoopThroughControl, Tuner};
     use coax::tuning::TunerSetting;
 
     fn tuner(id: &str, model: &str) -> Tuner {
@@ -376,6 +399,7 @@ mod tests {
                 decibels: vec![0.0, 6.5, 13.0],
                 deliveries: names(&["ISDB-S"]),
             }),
+            loop_through: None,
         }
     }
 
@@ -431,7 +455,7 @@ mod tests {
         assert_eq!(settings.lines(), [("pt3:a:1".to_owned(), gain)]);
         assert_eq!(
             settings.render(),
-            "[TunerSettings]\n; チューナー = lnb=off|low|high, gain=auto|min|max|+NdB（空はそのチューナーの既定）\npt3:a:1 = gain=auto\n"
+            "[TunerSettings]\n; チューナー = lnb=off|low|high, gain=auto|min|max|+NdB, loop_through=max|high|mid|low（空はそのチューナーの既定）\npt3:a:1 = gain=auto\n"
         );
     }
 
@@ -505,6 +529,33 @@ mod tests {
         let mut asked = words(&[("DELIVERY_SYSTEM", "ISDBS")]);
         told_to(&mut asked, &told, &told, &fixed, &odd);
         assert_eq!(asked, words(&[("DELIVERY_SYSTEM", "ISDBS")]));
+    }
+
+    /// The loop-through output is read, written back, and said only to a
+    /// tuner that has one.
+    #[test]
+    fn the_loop_through_output_goes_only_to_a_tuner_that_has_one() {
+        let mut settings = TunerSettings::default();
+        settings.add_line("px3:a:0", "loop_through=Low");
+        settings.add_line("px3:a:1", "loop_through=-8dB");
+        let setting = settings.for_tuner(&tuner("px3:a:0", ""));
+        assert_eq!(setting.loop_through, "low");
+        assert_eq!(settings.lines()[1].1, TunerSetting::default());
+        assert!(settings.render().contains("px3:a:0 = loop_through=low\n"));
+        let told = names(&["ISDB-S"]);
+        let with = Controls {
+            loop_through: Some(LoopThroughControl::default()),
+            ..Controls::default()
+        };
+        let mut asked = words(&[("DELIVERY_SYSTEM", "ISDBS")]);
+        told_to(&mut asked, &told, &told, &with, &setting);
+        assert_eq!(
+            asked,
+            words(&[("DELIVERY_SYSTEM", "ISDBS"), ("loop_through", "low")])
+        );
+        let mut bare = words(&[("DELIVERY_SYSTEM", "ISDBS")]);
+        told_to(&mut bare, &told, &told, &controls(), &setting);
+        assert_eq!(bare, words(&[("DELIVERY_SYSTEM", "ISDBS")]));
     }
 
     /// A tuner the routes said receives ISDB-S3, and that does not name it

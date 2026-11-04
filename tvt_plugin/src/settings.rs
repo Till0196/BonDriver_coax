@@ -94,11 +94,13 @@ mod windows {
     const ID_R_BAND: usize = 520;
     const ID_R_CARD: usize = 600;
     const ID_R_TUNER: usize = 700;
-    /// A tuner's supply and gain, beside its line.
+    /// A tuner's supply, gain and loop-through output, beside its line.
     const ID_R_LNB: usize = 800;
     const ID_R_GAIN: usize = 900;
+    const ID_R_LOOP: usize = 3000;
     const ID_R_LNB_LABEL: usize = 510;
     const ID_R_GAIN_LABEL: usize = 511;
+    const ID_R_LOOP_LABEL: usize = 512;
     /// The bands, in the order they are shown and the order they are
     /// written, with what each is called.
     const BANDS: [(Band, &str); 4] = [
@@ -603,28 +605,37 @@ mod windows {
         lines
     }
 
-    /// Whether any tuner has a supply or a gain to set, which is what gives
-    /// the route window its two extra columns.
+    /// Whether any tuner has a supply, a gain or a loop-through output to set,
+    /// which is what gives the route window its three extra columns.
     fn has_controls(editing: &Editing) -> bool {
         editing.tuners.iter().any(|tuner| {
-            editing
-                .listed
-                .controls(&tuner.id)
-                .is_some_and(|controls| controls.lnb.is_some() || controls.gain.is_some())
+            editing.listed.controls(&tuner.id).is_some_and(|controls| {
+                controls.lnb.is_some() || controls.gain.is_some() || controls.loop_through.is_some()
+            })
         })
     }
 
-    /// How wide the supply and gain columns are.
-    fn control_columns(m: &win::Metrics) -> (i32, i32) {
-        (m.line * 9, m.line * 6)
+    /// How wide the supply, gain and loop-through output columns are.
+    fn control_columns(m: &win::Metrics) -> (i32, i32, i32) {
+        (m.line * 9, m.line * 6, m.line * 8)
     }
 
-    /// How wide the route window is: wider by the two columns where a tuner
+    /// Where the supply, gain and loop-through output columns start, at the
+    /// right of a window this wide inside.
+    fn control_xs(m: &win::Metrics, inner: i32) -> (i32, i32, i32) {
+        let (lnb_wide, gain_wide, loop_wide) = control_columns(m);
+        let loop_x = m.margin + inner - loop_wide;
+        let gain_x = loop_x - m.gap - gain_wide;
+        let lnb_x = gain_x - m.gap - lnb_wide;
+        (lnb_x, gain_x, loop_x)
+    }
+
+    /// How wide the route window is: wider by the three columns where a tuner
     /// has something to set.
     fn route_wide(m: &win::Metrics, editing: &Editing) -> i32 {
         if has_controls(editing) {
-            let (lnb, gain) = control_columns(m);
-            ROUTE_WIDE + lnb + gain + m.gap * 2
+            let (lnb, gain, loop_through) = control_columns(m);
+            ROUTE_WIDE + lnb + gain + loop_through + m.gap * 3
         } else {
             ROUTE_WIDE
         }
@@ -739,11 +750,9 @@ mod windows {
             return;
         };
         let inner = route_wide(&m, editing) - m.margin * 2;
-        let (lnb_wide, gain_wide) = control_columns(&m);
+        let (lnb_wide, gain_wide, loop_wide) = control_columns(&m);
         let controls = has_controls(editing);
-        // Where the supply and gain columns start, at the right.
-        let lnb_x = m.margin + inner - lnb_wide - gain_wide - m.gap;
-        let gain_x = m.margin + inner - gain_wide;
+        let (lnb_x, gain_x, loop_x) = control_xs(&m, inner);
         let line_high = tuner_high(&m, editing);
         OPENED_ON
             .lock()
@@ -863,6 +872,14 @@ mod windows {
                 (gain_x, y, gain_wide, m.row),
                 ID_R_GAIN_LABEL,
             );
+            control(
+                window,
+                "STATIC",
+                "ループスルー出力",
+                SS_CENTERIMAGE,
+                (loop_x, y, loop_wide, m.row),
+                ID_R_LOOP_LABEL,
+            );
         }
         y += m.row;
         let lines = tuner_lines(editing);
@@ -911,7 +928,7 @@ mod windows {
                     );
                     let id = &editing.tuners[*index].id;
                     tick(window, ID_R_TUNER + index, named.contains(id));
-                    furnish_tuner(window, editing, *index, (lnb_x, gain_x, y), &m);
+                    furnish_tuner(window, editing, *index, (lnb_x, gain_x, loop_x, y), &m);
                 }
             }
             y += if tuner.is_some() { line_high } else { m.row };
@@ -987,16 +1004,17 @@ mod windows {
         follow_system(window);
     }
 
-    /// Puts a tuner's supply and gain beside its line, where it has them. A
-    /// supply its board shares is shown on the board's first tuner only.
+    /// Puts a tuner's supply, gain and loop-through output beside its line,
+    /// where it has them. A supply its board shares is shown on the board's
+    /// first tuner only.
     fn furnish_tuner(
         window: Handle,
         editing: &Editing,
         index: usize,
-        (lnb_x, gain_x, y): (i32, i32, i32),
+        (lnb_x, gain_x, loop_x, y): (i32, i32, i32, i32),
         m: &win::Metrics,
     ) {
-        let (lnb_wide, gain_wide) = control_columns(m);
+        let (lnb_wide, gain_wide, loop_wide) = control_columns(m);
         let Some(tuner) = editing.tuners.get(index) else {
             return;
         };
@@ -1033,10 +1051,19 @@ mod windows {
                 &setting.gain,
             );
         }
+        if let Some(loop_through) = editing.loop_through_of(index) {
+            choice(
+                window,
+                (loop_x, y, loop_wide, m.row + 4),
+                ID_R_LOOP + index,
+                &editing::loop_through_choices(loop_through),
+                &setting.loop_through,
+            );
+        }
     }
 
-    /// Puts what the route window's supply and gain lists say into the edit,
-    /// for the lists a viewer moved.
+    /// Puts what the route window's supply, gain and loop-through output lists
+    /// say into the edit, for the lists a viewer moved.
     fn take_tuner_settings(window: Handle) {
         with_editing(|editing| {
             for index in 0..editing.tuners.len().min(MOST_TUNERS) {
@@ -1052,6 +1079,13 @@ mod windows {
                 if let (Some(gain), Some(at)) = (&controls.gain, moved(window, ID_R_GAIN + index)) {
                     if let Some((value, _)) = editing::gain_choices(gain).get(at) {
                         editing.set_gain(index, value);
+                    }
+                }
+                if let (Some(loop_through), Some(at)) =
+                    (&controls.loop_through, moved(window, ID_R_LOOP + index))
+                {
+                    if let Some((value, _)) = editing::loop_through_choices(loop_through).get(at) {
+                        editing.set_loop_through(index, value);
                     }
                 }
             }
@@ -1089,9 +1123,7 @@ mod windows {
         with_editing(|editing| {
             let m = win::metrics();
             let inner = route_wide(&m, editing) - m.margin * 2;
-            let (lnb_wide, gain_wide) = control_columns(&m);
-            let lnb_x = m.margin + inner - lnb_wide - gain_wide - m.gap;
-            let gain_x = m.margin + inner - gain_wide;
+            let (lnb_x, gain_x, loop_x) = control_xs(&m, inner);
             let lines = tuner_lines(editing);
             let mut y = m.margin + (m.row + 4 + m.gap) * 2 + m.row;
             for (row, (tuner, _)) in lines.iter().enumerate() {
@@ -1107,6 +1139,7 @@ mod windows {
                         (ID_R_TUNER + index, m.margin + m.line * 2),
                         (ID_R_LNB + index, lnb_x),
                         (ID_R_GAIN + index, gain_x),
+                        (ID_R_LOOP + index, loop_x),
                     ],
                     None => vec![(ID_R_CARD + row, m.margin + m.line)],
                 };

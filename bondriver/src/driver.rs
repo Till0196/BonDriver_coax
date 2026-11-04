@@ -755,6 +755,7 @@ mod tests {
                     ..LnbControl::default()
                 }),
                 gain: Some(GainControl::default()),
+                loop_through: None,
             },
         )
     }

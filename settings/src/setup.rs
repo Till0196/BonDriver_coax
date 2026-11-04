@@ -662,7 +662,7 @@ cable = DVBC/ANNEX_A, tbs:*
         let written = setup.write_into(&file);
         assert!(
             written.contains(
-                "[TunerSettings]\n; チューナー = lnb=off|low|high, gain=auto|min|max|+NdB（空はそのチューナーの既定）\npt3:*:0           = lnb=high\nmodel:TBS 6205se* = gain=auto\n"
+                "[TunerSettings]\n; チューナー = lnb=off|low|high, gain=auto|min|max|+NdB, loop_through=max|high|mid|low（空はそのチューナーの既定）\npt3:*:0           = lnb=high\nmodel:TBS 6205se* = gain=auto\n"
             ),
             "{written}"
         );

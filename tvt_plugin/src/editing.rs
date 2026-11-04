@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use coax::daemon::{GainControl, LnbControl, Tuner};
+use coax::daemon::{GainControl, LnbControl, LoopThroughControl, Tuner};
 use coax::delivery::{self, Family};
 use coax::tuning::TunerSetting;
 use coax_settings::config::Route;
@@ -343,6 +343,23 @@ impl Editing {
         self.tuner_settings.set(&listed, setting);
     }
 
+    /// The loop-through output a tuner lets a channel set.
+    pub fn loop_through_of(&self, tuner: usize) -> Option<&LoopThroughControl> {
+        self.listed
+            .controls(&self.tuners.get(tuner)?.id)?
+            .loop_through
+            .as_ref()
+    }
+
+    pub fn set_loop_through(&mut self, tuner: usize, value: &str) {
+        let Some(listed) = self.tuners.get(tuner).cloned() else {
+            return;
+        };
+        let mut setting = self.setting_of(tuner);
+        setting.loop_through = value.to_owned();
+        self.tuner_settings.set(&listed, setting);
+    }
+
     /// How a route reads in the list: its label, what it is tuned as, and
     /// what it is on -- with where it walks, where that is a question.
     pub fn route_line(route: &Route) -> String {
@@ -407,6 +424,26 @@ pub fn gain_choices(gain: &GainControl) -> Vec<(String, String)> {
     choices
 }
 
+/// What a tuner's loop-through output can be set to: its default, and the four
+/// levels, or on and off for an output that has no levels.
+pub fn loop_through_choices(loop_through: &LoopThroughControl) -> Vec<(String, String)> {
+    let choices: &[(&str, &str)] = if loop_through.switch {
+        &[("", "既定"), ("max", "入"), ("low", "切")]
+    } else {
+        &[
+            ("", "既定"),
+            ("max", "最大"),
+            ("high", "高"),
+            ("mid", "中"),
+            ("low", "低"),
+        ]
+    };
+    choices
+        .iter()
+        .map(|(value, shown)| ((*value).to_owned(), (*shown).to_owned()))
+        .collect()
+}
+
 /// The stretches of the plan a route walks, as a viewer reads them -- and
 /// nothing at all for a route that walks none of them. A satellite route is
 /// asked rather than walked, and one on the optical distribution walks a grid
@@ -426,8 +463,8 @@ pub fn bands_shown(route: &Route) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Editing, gain_choices, lnb_choices};
-    use coax::daemon::{Board, Controls, GainControl, Held, LnbControl, Tuner};
+    use super::{Editing, gain_choices, lnb_choices, loop_through_choices};
+    use coax::daemon::{Board, Controls, GainControl, Held, LnbControl, LoopThroughControl, Tuner};
     use coax::plan::Band;
     use coax_settings::config::Route;
     use coax_settings::tuner_settings::Listed;
@@ -637,6 +674,7 @@ mod tests {
                 ..LnbControl::default()
             }),
             gain: None,
+            loop_through: None,
         };
         let amplified = Controls {
             lnb: Some(LnbControl {
@@ -649,6 +687,7 @@ mod tests {
                 decibels: vec![0.0, 13.0],
                 deliveries: vec!["ISDB-T".to_owned()],
             }),
+            loop_through: Some(LoopThroughControl { switch: true }),
         };
         let listed = Listed::of(
             vec![
@@ -714,6 +753,19 @@ mod tests {
             editing.gain_of(0, "ISDBT").is_none(),
             "a PT3 has no amplifier to set"
         );
+        // The loop-through output, on or off.
+        assert!(editing.loop_through_of(0).is_none());
+        let loop_through = editing.loop_through_of(2).expect("the output");
+        let values: Vec<String> = loop_through_choices(loop_through)
+            .into_iter()
+            .map(|(value, _)| value)
+            .collect();
+        assert_eq!(values, ["", "max", "low"]);
+        let steps: Vec<String> = loop_through_choices(&LoopThroughControl::default())
+            .into_iter()
+            .map(|(value, _)| value)
+            .collect();
+        assert_eq!(steps, ["", "max", "high", "mid", "low"]);
     }
 
     /// A supply the board shares is one setting, shown on its first tuner and
@@ -731,9 +783,10 @@ mod tests {
         assert_eq!(editing.setting_of(2).lnb, "");
         editing.set_gain(2, "+13dB");
         editing.set_lnb(2, "low");
+        editing.set_loop_through(2, "max");
         let written = editing.written();
         assert!(
-            written.contains("tbs:b:0 = lnb=low, gain=+13dB\n"),
+            written.contains("tbs:b:0 = lnb=low, gain=+13dB, loop_through=max\n"),
             "{written}"
         );
         assert!(written.contains("pt3:*   = lnb=high\n"), "{written}");
