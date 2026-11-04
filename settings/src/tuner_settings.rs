@@ -218,9 +218,10 @@ pub struct Listed {
     /// [`coax::daemon::declare`]).
     pub tuners: Vec<Tuner>,
     /// Per tuner, in the same order: the systems it named itself, the board
-    /// it is on, and its controls.
+    /// it is on and the enclosure that is one of, and its controls.
     told: Vec<Vec<String>>,
     boards: Vec<String>,
+    enclosures: Vec<String>,
     controls: Vec<Controls>,
 }
 
@@ -233,6 +234,7 @@ impl Listed {
             for held in board.tuners {
                 listed.told.push(held.tuner.deliveries.clone());
                 listed.boards.push(board.name.clone());
+                listed.enclosures.push(board.enclosure.clone());
                 listed.controls.push(held.controls);
                 listed.tuners.push(held.tuner);
             }
@@ -253,6 +255,25 @@ impl Listed {
     /// The board a tuner is on.
     pub fn board(&self, id: &str) -> Option<&str> {
         self.boards.get(self.at(id)?).map(String::as_str)
+    }
+
+    /// What a tuner's shared LNB supply is one line for: the enclosure, where
+    /// the supply is the card's and the board is one of an enclosure, and the
+    /// board otherwise. Two tuners giving the same answer switch one supply.
+    pub fn supply(&self, id: &str) -> Option<String> {
+        let at = self.at(id)?;
+        let card = self
+            .controls
+            .get(at)?
+            .lnb
+            .as_ref()
+            .is_some_and(|lnb| lnb.shared == "card");
+        match self.enclosures.get(at) {
+            Some(enclosure) if card && !enclosure.is_empty() => {
+                Some(format!("enclosure {enclosure}"))
+            }
+            _ => self.boards.get(at).map(|board| format!("board {board}")),
+        }
     }
 
     /// The systems a tuner named itself, before the routes added theirs.
@@ -614,6 +635,7 @@ mod tests {
         assert_eq!(listed.told("pt3:a:0"), Some(&names(&["ISDB-S"])[..]));
         assert_eq!(listed.tuners[0].deliveries, names(&["ISDB-S", "ISDBS3"]));
         assert_eq!(listed.board("pt3:a:0"), Some("pt3:a"));
+        assert_eq!(listed.supply("pt3:a:0"), Some("board pt3:a".to_owned()));
         let mut settings = TunerSettings::default();
         settings.add_line("pt3:*", "lnb=high");
         let tune = words(&[

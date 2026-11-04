@@ -258,7 +258,8 @@ impl Editing {
     }
 
     /// Whether a tuner's supply is set on its own line, rather than on the
-    /// line of the tuner before it on the same board: one supply that feeds
+    /// line of the tuner before it on the same supply -- the same board, or the
+    /// same enclosure where the supply is the card's: one supply that feeds
     /// several tuners is one setting, shown once.
     pub fn lnb_is_shown(&self, tuner: usize) -> bool {
         let Some(id) = self.tuners.get(tuner).map(|tuner| tuner.id.as_str()) else {
@@ -274,9 +275,9 @@ impl Editing {
         if lnb.shared.is_empty() {
             return true;
         }
-        let board = self.listed.board(id);
+        let supply = self.listed.supply(id);
         !self.tuners[..tuner].iter().any(|before| {
-            self.listed.board(&before.id) == board
+            self.listed.supply(&before.id) == supply
                 && self
                     .listed
                     .controls(&before.id)
@@ -313,13 +314,13 @@ impl Editing {
             .controls(&id)
             .and_then(|controls| controls.lnb.as_ref())
             .is_some_and(|lnb| !lnb.shared.is_empty());
-        let board = self.listed.board(&id).map(str::to_owned);
+        let supply = self.listed.supply(&id);
         let on: Vec<usize> = (0..self.tuners.len())
             .filter(|at| {
                 let other = &self.tuners[*at].id;
                 *other == id
                     || (shared
-                        && self.listed.board(other).map(str::to_owned) == board
+                        && self.listed.supply(other) == supply
                         && self
                             .listed
                             .controls(other)
@@ -766,6 +767,46 @@ mod tests {
             .map(|(value, _)| value)
             .collect();
         assert_eq!(steps, ["", "max", "high", "mid", "low"]);
+    }
+
+    /// The two boards of an enclosure whose supply is the card's are one
+    /// setting, shown on the first tuner and written for both boards' tuners.
+    #[test]
+    fn an_enclosure_supply_is_set_once_for_both_boards() {
+        let shared = Controls {
+            lnb: Some(LnbControl {
+                levels: vec!["off".to_owned(), "high".to_owned()],
+                shared: "card".to_owned(),
+                ..LnbControl::default()
+            }),
+            ..Controls::default()
+        };
+        let half = |name: &str, enclosure: &str, id: &str| Board {
+            enclosure: enclosure.to_owned(),
+            ..board(name, vec![tuner(id, "PLEX PX-W3U3", &["ISDB-S"])], &shared)
+        };
+        let listed = Listed::of(
+            vec![
+                half("px3:a", "001:020", "px3:a:0"),
+                half("px3:b", "001:020", "px3:b:0"),
+                half("px3:c", "", "px3:c:0"),
+            ],
+            &[],
+        );
+        let mut editing = Editing::open(
+            PathBuf::from("BonDriver_coax.ini"),
+            String::new(),
+            Some(listed),
+        );
+        assert!(editing.lnb_is_shown(0));
+        assert!(!editing.lnb_is_shown(1), "the other board of the enclosure");
+        assert!(
+            editing.lnb_is_shown(2),
+            "a board of no enclosure is its own"
+        );
+        editing.set_lnb(0, "high");
+        assert_eq!(editing.setting_of(1).lnb, "high");
+        assert_eq!(editing.setting_of(2).lnb, "");
     }
 
     /// A supply the board shares is one setting, shown on its first tuner and
