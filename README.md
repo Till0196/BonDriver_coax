@@ -3,6 +3,31 @@
 [coax](https://github.com/Till0196/coax)の`coaxd`のチューナーを、TVTestやEDCBからBonDriverとして使うためのものです。
 BonDriver本体、デバイス設定やチャンネル定義を作成するTVTestプラグイン、カードリーダー用の`winscard.dll`の3つでできています。
 
+## ダウンロード
+
+[BonDriver_coaxのリリース](https://github.com/Till0196/BonDriver_coax/releases/latest)と、[coaxのリリース](https://github.com/Till0196/coax/releases/latest)の両方が必要です。
+BonDriver_coaxは、読み込むソフト（TVTestやEDCB）と同じアーキテクチャのものを選びます。
+
+| 使うソフト | ファイル | 中身 |
+|---|---|---|
+| x64のTVTest、EDCB | `BonDriver_coax-x86_64-pc-windows-gnullvm.zip` | `BonDriver_coax.dll`、`winscard.dll`、`Plugins\coax.tvtp` |
+| 32bitのTVTest、EDCB | `BonDriver_coax-i686-pc-windows-gnullvm.zip` | 同上 |
+| Linux版のEDCB（x86_64） | `BonDriver_coax-x86_64-unknown-linux-gnu.tar.gz` | `BonDriver_coax.so` |
+| Linux版のEDCB（arm64） | `BonDriver_coax-aarch64-unknown-linux-gnu.tar.gz` | 同上 |
+| Linux版のEDCB（armhf） | `BonDriver_coax-armv7-unknown-linux-gnueabihf.tar.gz` | 同上 |
+| Linux版のEDCB（32bit x86） | `BonDriver_coax-i686-unknown-linux-gnu.tar.gz` | 同上 |
+
+`coaxd`は、OSに合ったものを選びます。
+
+| OS | ファイル |
+|---|---|
+| Windows（x64） | `coax_Windows_amd64.zip` |
+| Windows（arm64） | `coax_Windows_arm64.zip` |
+| Windows（32bit） | `coax_Windows_i386.zip` |
+| Linux | `coax_Linux_amd64.tar.gz`、`coax_Linux_arm64.tar.gz`、`coax_Linux_armv7.tar.gz`、`coax_Linux_i386.tar.gz`（`.deb`、`.rpm`、`.apk`もあります） |
+
+アーキテクチャを混ぜて使うときの注意は[アーキテクチャの選び方](docs/architecture.md)にあります。
+
 ## 入れ方（TVTest）
 
 TVTestのフォルダーに次のように置きます。
@@ -35,40 +60,24 @@ Plugins\
 外付けのカードリーダーもそのまま使えます。
 内蔵スロットが無い機器なら置かなくても構いません。
 
-32bitのTVTestには32bit版、64bitには64bit版を使ってください。
+BonDriverと`coaxd.exe`をサブフォルダーに置く場合は、`winscard.ini`で`coaxd.exe`の場所を指定してください。
+設定の項目とログの取り方は[設定](docs/settings.md)にあります。
 
 ## EDCBで使う
 
 `BonDriver_coax.dll`（Linux版のEDCBなら`BonDriver_coax.so`）をEDCBのBonDriverフォルダーに置きます。
 EDCBは`BonDriver_coax(…).ChSet4.txt`が無いとチューナーとして一覧に表示しないので、最初に`EpgDataCap_Bon`でチャンネルスキャンをしてください。
 設定ファイルはTVTestで作ったものをそのまま使えます。
+Linux版のEDCBでの設定とカードの使い方は[Linux版のEDCB](docs/settings.md#linux版のedcb)にあります。
+1チューナーに1つのDLLを割り当てる方法は[DLLを複製して使う](docs/settings.md#dllを複製して使う)にあります。
 
-## ビルド
+## ドキュメント
 
-そのOSの上でそのOS向けに組むなら、rustupだけで組めます（WindowsはVisual StudioのC++ビルドツールも）。
-
-```sh
-cargo build --release                    # 64bit Windows（MSVC）
-cargo build --release -p bondriver_coax  # Linux版のEDCB（組んだ機械のglibc以降で動く）
-```
-
-クロスビルドはzigを使います（32bit Windowsや、古いglibcのボード向けも）。PATHの通った`zig`と`cargo install cargo-zigbuild`があれば、どのOSからでも同じ手順で組めます。
-
-```sh
-cargo win          # 64bit Windows
-cargo win32        # 32bit Windows
-cargo linux        # Linux版のEDCB（glibc 2.17以降。arm64 は linux-arm64、armhf は linux-armhf）
-```
-
-成果物は`target/release/`（ターゲットを指定したときは`target/<ターゲット>/release/`）に出ます。
-Linux版は`libBonDriver_coax.so`として出るので、`BonDriver_coax.so`に名前を変えて置いてください。
-
-動作の確認には、ホストと同じ順でBonDriverを呼ぶ`bondriver-probe`が使えます。
-
-```sh
-bondriver-probe BonDriver_coax.dll              # チャンネルを列挙する
-bondriver-probe BonDriver_coax.dll 0 3 out.ts   # 空間0のチャンネル3を受けて書き出す
-```
+| | |
+|---|---|
+| [アーキテクチャの選び方](docs/architecture.md) | BonDriver_coaxと`coaxd`のアーキテクチャを混ぜて使うときの注意 |
+| [設定](docs/settings.md) | 設定ファイルの項目、DLLの複製、Linux版のEDCB、ログの取り方 |
+| [ビルド](docs/build.md) | ソースからの組み方と`bondriver-probe` |
 
 ## ライセンス
 
