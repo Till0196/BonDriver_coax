@@ -43,7 +43,13 @@ Plugins\
 ```
 
 `coaxd`はcoaxのリリースから入手してください。
-ファームウェアの入手と置き方は[coaxの説明](https://github.com/Till0196/coax/blob/main/docs/setup/firmware.md)にあります。
+
+> [!IMPORTANT]
+> デバイスによっては、ファームウェアが必要です。
+> 必要なファイルが`coaxd.exe`と同じフォルダーの`firmware\`に無いと、そのデバイスは使えません（選局が`no_firmware`で失敗します）。
+> coaxにはファームウェアが入っていないので、各自で用意してください。
+>
+> どのデバイスに何が要るか、入手の方法は、coaxの[ファームウェアの用意](https://github.com/Till0196/coax/blob/main/docs/setup/firmware.md)と[デバイスごとの説明](https://github.com/Till0196/coax/tree/main/docs/boards)にあります。
 
 あとはプラグインに従ってください。
 
