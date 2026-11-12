@@ -487,12 +487,26 @@ impl Driver {
         } else {
             match self.lineup.spaces().get(space as usize) {
                 Some(space) if !space.tuners.is_empty() => space.tuners.clone(),
-                _ if !self.settings.is_empty() => vec![ANY_TUNER.to_owned()],
+                // Nothing names a tuner: any that receives the system, so a
+                // setting knows where it goes, and the daemon's choice when
+                // none says it does.
+                _ if !self.settings.is_empty() => {
+                    let any = self.named_candidates(&[ANY_TUNER.to_owned()], system);
+                    return if any.is_empty() { vec![None] } else { any };
+                }
                 _ => return vec![None],
             }
         };
-        let matched = daemon::candidates(&self.listed.tuners, &patterns, system);
-        if matched.iter().any(Option::is_some) {
+        // Tuners named that are not there give nothing to ask: another tuner
+        // would be one the settings did not ask for.
+        self.named_candidates(&patterns, system)
+    }
+
+    /// The tuners the patterns name, from the daemon's listing, asked for again
+    /// when what was listed before names none of them.
+    fn named_candidates(&mut self, patterns: &[String], system: &str) -> Vec<Option<String>> {
+        let matched = daemon::candidates(&self.listed.tuners, patterns, system);
+        if !matched.is_empty() {
             return matched;
         }
         // Not asked yet for this tune, or a pattern of another way matched
@@ -507,7 +521,7 @@ impl Driver {
                 Listed::default()
             }
         };
-        daemon::candidates(&self.listed.tuners, &patterns, system)
+        daemon::candidates(&self.listed.tuners, patterns, system)
     }
 
     pub fn current_space(&self) -> u32 {
@@ -1101,6 +1115,26 @@ mod tests {
             TunerSettings::default(),
         );
         assert_eq!(driver.candidates(0, &Route::default(), "ISDBT"), vec![None]);
+    }
+
+    /// A way that names tuners none of which is there asks no tuner, rather
+    /// than leave the choice to the daemon.
+    #[test]
+    fn a_way_whose_tuners_are_not_there_asks_none() {
+        let mut driver = Driver::new(
+            lineup(),
+            "coax",
+            nowhere(),
+            None,
+            Vec::new(),
+            TunerSettings::default(),
+        );
+        driver.listed = listed(vec![pt3("pt3:a:0")]);
+        let away = Route {
+            tuners: vec!["model:Elsewhere*".to_owned(), "tbs:x:0".to_owned()],
+            ..Route::default()
+        };
+        assert!(driver.candidates(0, &away, "ISDBT").is_empty());
     }
 
     /// A refusal about the signal ends the round of tuners; one about a tuner

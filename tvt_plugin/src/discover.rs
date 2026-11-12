@@ -506,6 +506,18 @@ pub fn sweep(
             continue;
         }
         let walking: Vec<coax_settings::channels::Channel> = plan.clone();
+        if only.is_none() && !receivable(tuners, &route.tuners, &route.system) {
+            total.set(total.get().saturating_sub(plan.len()));
+            progress(Step {
+                what: &format!(
+                    "{} ({}) を受けられるチューナーがありません",
+                    route.label, route.system
+                ),
+                done: 0,
+                ..Step::default()
+            });
+            continue;
+        }
         // One tuner for the whole route, held on one connection: the daemon
         // gives a tuner to the connection that asked for it, so a walk that
         // opened one per carrier may find it taken when it asks again.
@@ -1286,24 +1298,16 @@ fn satellite_passes(system: &str) -> [(bool, usize); 2] {
 ///
 /// A tuner that lists nothing is counted as able: the list is what a backend
 /// knows without opening the card, and several do not know until they have.
-/// Only a tuner that named its systems and left this one out is a no.
+/// A tuner that named its systems and left this one out is a no, and so are
+/// patterns that name no tuner the daemon listed: the tuners they name are not
+/// there.
 fn receivable(tuners: &[coax::daemon::Tuner], patterns: &[String], system: &str) -> bool {
     if patterns.is_empty() || tuners.is_empty() {
         return true;
     }
-    let mut matched = false;
-    for tuner in tuners {
-        if !patterns.iter().any(|pattern| tuner.matches(pattern)) {
-            continue;
-        }
-        matched = true;
-        if tuner.receives(system) {
-            return true;
-        }
-    }
-    // Patterns that named no tuner the daemon listed say nothing about what can
-    // be received.
-    !matched
+    tuners.iter().any(|tuner| {
+        patterns.iter().any(|pattern| tuner.matches(pattern)) && tuner.receives(system)
+    })
 }
 
 /// Whether a delivery system is one of the 110 degree east ones, which the plan
@@ -3735,9 +3739,9 @@ cable = ISDBC, tbs:*
         // A tuner that named nothing is asked.
         let says_nothing = [tuner("pt3:0:0", &[])];
         assert!(super::receivable(&says_nothing, &patterns, "ISDBS3"));
-        // And so is a pattern the daemon listed no tuner for.
+        // A pattern the daemon listed no tuner for is not.
         let elsewhere = [tuner("tbs:abc:0", &["ISDB-T"])];
-        assert!(super::receivable(&elsewhere, &patterns, "ISDBS3"));
+        assert!(!super::receivable(&elsewhere, &patterns, "ISDBS3"));
     }
 
     /// The satellite plan is walked once per route: the advanced services are
